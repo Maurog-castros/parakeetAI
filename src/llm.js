@@ -1,7 +1,7 @@
 'use strict';
 // Chat client for the ia.iamiko.cl VSCode gateway (OpenAI-compatible chat,
-// authenticated with the custom X-Iamiko-Token header). STT is done locally
-// in the renderer (Transformers.js), not here.
+// authenticated with the custom X-Iamiko-Token header). Realtime STT runs in
+// the renderer against the voice gateway (see renderer/deepgram.js).
 
 const DEFAULT_RESPONSE_CHARS = 500;
 const MIN_RESPONSE_CHARS = 120;
@@ -43,8 +43,10 @@ function cfg() {
     hasKey: !!token,
     chatModel: process.env.CHAT_MODEL || 'auto-vscode',
     sttLang: process.env.STT_LANG || 'es',
-    deepgramKey: process.env.DEEPGRAM_API_KEY || '',
-    deepgramModel: process.env.DEEPGRAM_MODEL || 'nova-2',
+    // Realtime STT: Deepgram-compatible WebSocket on the iamiko voice gateway.
+    sttUrl: (process.env.STT_URL || 'wss://stt.iamiko.cl/v1/listen').replace(/\/+$/, ''),
+    sttKey: process.env.STT_TOKEN || '',
+    sttModel: process.env.STT_MODEL || process.env.DEEPGRAM_MODEL || 'nova-2',
   };
 }
 
@@ -67,9 +69,14 @@ async function probe() {
   }
 }
 
-function buildSystem(context) {
-  const cv = (context && context.cv || '').slice(0, 6000);
-  const jd = (context && context.jd || '').slice(0, 3000);
+// Rules for the live answer (format, length, personal instructions). Sent to
+// the voice gateway as Configure.instructions; CV/JD go separately as context.
+// role 'interviewer': answer what the interviewer asks (system audio).
+// role 'candidate': the user's own questions (microphone) get a quick,
+// factual explanation to lean on.
+function buildInstructions(context, role) {
+  const candidate = role === 'candidate';
+  const hasCv = !!String(context && context.cv || '').trim();
   const responseChars = normalizeResponseChars(context && context.responseChars);
   const responseFormat = normalizeResponseFormat(context && context.responseFormat);
   const responseInstructions = normalizeResponseInstructions(context && context.responseInstructions);
@@ -82,31 +89,76 @@ function buildSystem(context) {
       '- FORMATO: lista de 2-4 viñetas breves; cada viñeta comienza con "• ".',
       '- Cada viñeta debe expresar una sola idea fácil de decir en voz alta.',
     ];
+  const header = candidate
+    ? [
+      'Eres el copiloto de entrevista del CANDIDATO durante una entrevista por Teams/Meet.',
+      'Recibes la transcripcion de lo que dice el PROPIO CANDIDATO por su microfono.',
+      '',
+      'TAREA: si la ultima intervencion del candidato es una pregunta (tecnica, sobre el cargo o un concepto),',
+      `respondela con una explicacion breve, precisa y facil de decir de hasta ${responseChars} caracteres.`,
+      'Reglas de la respuesta:',
+      '- Ve directo a la respuesta: primero el concepto clave y luego lo esencial para explicarlo.',
+      ...formatRules,
+      '- Relaciona con el CARGO o el CV solo si aporta.',
+    ]
+    : [
+      'Eres el copiloto de entrevista del CANDIDATO durante una entrevista por Teams/Meet.',
+      'Recibes la transcripcion de lo que dice el ENTREVISTADOR.',
+      '',
+      'TAREA: si la ultima intervencion es una pregunta o pide algo que el candidato deba responder,',
+      `redacta una respuesta oral natural de hasta ${responseChars} caracteres, incluyendo espacios.`,
+      'Reglas de la respuesta:',
+      '- Primera persona, como una persona real hablando; no como un manual ni una IA.',
+      ...formatRules,
+      '- Varía el inicio y evita repetir "Yo" o "En mi experiencia" mecánicamente.',
+      '- Alineada a las FUNCIONES DEL CARGO y respaldada por el CV cuando aplique.',
+    ];
   return [
-    'Eres el copiloto de entrevista del CANDIDATO durante una entrevista por Teams/Meet.',
-    'Recibes la transcripcion de lo que dice el ENTREVISTADOR.',
-    '',
-    'TAREA: si la ultima intervencion es una pregunta o pide algo que el candidato deba responder,',
-    `redacta una respuesta oral natural de hasta ${responseChars} caracteres, incluyendo espacios.`,
-    'Reglas de la respuesta:',
-    '- Primera persona, como una persona real hablando; no como un manual ni una IA.',
-    ...formatRules,
-    '- Varía el inicio y evita repetir "Yo" o "En mi experiencia" mecánicamente.',
-    '- Alineada a las FUNCIONES DEL CARGO y respaldada por el CV cuando aplique.',
+    ...header,
     '- Concreta, cálida y profesional. Sin relleno, preámbulos, jerga corporativa ni datos inventados.',
     `- Límite estricto: ${responseChars} caracteres. Termina la idea antes de alcanzar el límite.`,
+    '- NUNCA inventes empresas, proyectos, cifras, porcentajes ni tecnologías que no aparezcan en el CV.',
+    hasCv || candidate
+      ? null
+      : '- No hay CV: no afirmes experiencia concreta; explica el concepto y cómo lo abordarías, sin casos ni números.',
     responseInstructions ? '' : null,
     responseInstructions ? '=== INSTRUCCIONES PERSONALES DEL CANDIDATO ===' : null,
     responseInstructions || null,
     responseInstructions ? 'Aplica estas instrucciones sin contradecir las reglas anteriores ni inventar datos.' : null,
     'Si la intervencion NO es una pregunta ni requiere respuesta, responde EXACTAMENTE con "—".',
-    '',
+  ].filter((line) => line !== null).join('\n');
+}
+
+function buildContextBlock(context) {
+  const cv = (context && context.cv || '').slice(0, 6000);
+  const jd = (context && context.jd || '').slice(0, 3000);
+  return [
     '=== DESCRIPCION DEL CARGO ===',
     jd || '(no proporcionada)',
     '',
     '=== CV DEL CANDIDATO ===',
     cv || '(no proporcionado)',
-  ].filter((line) => line !== null).join('\n');
+  ].join('\n');
+}
+
+function buildSystem(context) {
+  return buildInstructions(context) + '\n\n' + buildContextBlock(context);
+}
+
+function suggestMaxTokens(responseChars) {
+  return Math.min(800, Math.max(96, Math.ceil(normalizeResponseChars(responseChars) / 2)));
+}
+
+// Configure message for the voice gateway (live answers are generated there).
+function gatewayConfigure(context, resetHistory, role) {
+  const msg = {
+    type: 'Configure',
+    instructions: buildInstructions(context, role),
+    context: buildContextBlock(context),
+    max_tokens: suggestMaxTokens(context && context.responseChars),
+  };
+  if (resetHistory) msg.reset_history = true;
+  return msg;
 }
 
 // Strip reasoning blocks some models emit (e.g. Qwen "<think>…</think>").
@@ -161,7 +213,7 @@ async function suggest(transcript, context, onDelta, signal) {
       { role: 'user', content: 'ENTREVISTADOR (reciente):\n' + transcript },
     ],
     temperature: 0.3,
-    max_tokens: Math.min(800, Math.max(96, Math.ceil(responseChars / 2))),
+    max_tokens: suggestMaxTokens(responseChars),
     stream: !!onDelta,
   };
   const r = await fetch(`${c.baseUrl}/chat/completions`, {
@@ -267,6 +319,9 @@ module.exports = {
   readCompletion,
   stripThinking,
   buildSystem,
+  buildInstructions,
+  buildContextBlock,
+  gatewayConfigure,
   limitResponse,
   normalizeResponseChars,
   normalizeResponseFormat,

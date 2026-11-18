@@ -2,12 +2,12 @@
 <html lang="es">
 <head>
 <meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; worker-src 'self' blob: https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https://cdn.jsdelivr.net wss://api.deepgram.com https://api.deepgram.com; object-src 'none'; base-uri 'none'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; worker-src 'self' blob: https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https://cdn.jsdelivr.net wss://stt.iamiko.cl wss://api.deepgram.com https://api.deepgram.com; object-src 'none'; base-uri 'none'" />
 <style>
   :root {
     --bg: rgba(16,18,24,0.92); --fg:#e9ecf2; --mut:#9aa3b8; --dim:#6c7488;
     --acc:#6ea8fe; --acc-ink:#0b1020; --ok:#5fd39a; --warn:#f2c46b; --err:#ff8080; --danger:#e05555;
-    --card:rgba(30,34,44,0.92); --line:rgba(255,255,255,0.09); --line-strong:rgba(255,255,255,0.16);
+    --mine:#c49bff; --card:rgba(30,34,44,0.92); --line:rgba(255,255,255,0.09); --line-strong:rgba(255,255,255,0.16);
     --radius:10px;
   }
   * { box-sizing: border-box; }
@@ -16,29 +16,36 @@
   #app { position:relative; height:100vh; display:flex; flex-direction:column; background:var(--bg);
          border:1px solid var(--line-strong); border-radius:14px; overflow:hidden; backdrop-filter: blur(10px); }
 
-  /* --- header (drag handle) --- */
-  header { -webkit-app-region: drag; display:flex; align-items:center; gap:4px; padding:6px 6px 6px 12px;
-           background:rgba(0,0,0,0.28); border-bottom:1px solid var(--line); user-select:none; }
-  header .title { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; letter-spacing:.01em; white-space:nowrap; }
-  header .grip { color:var(--dim); font-size:11px; font-weight:400; }
-  header .spacer { flex:1; }
+  /* --- toolbar (drag handle) --- */
+  #toolbar { -webkit-app-region: drag; display:flex; align-items:center; gap:6px; padding:6px 8px;
+             background:rgba(0,0,0,0.28); border-bottom:1px solid var(--line); user-select:none; flex:none; }
+  #toolbar .spacer { flex:1; min-width:12px; }
   /* Electron drag regions swallow clicks even under overlays: opt every overlay out. */
-  header button, #ctxPanel, #ctxPanel *, dialog button, dialog input, dialog summary { -webkit-app-region: no-drag; }
-  .dot { width:8px; height:8px; border-radius:50%; background:var(--dim); flex:none; transition:background .2s; }
-  .dot.live { background:var(--ok); box-shadow:0 0 0 3px rgba(95,211,154,.18); animation:pulse 1.6s ease-in-out infinite; }
-  .dot.err { background:var(--err); }
-  @keyframes pulse { 50% { box-shadow:0 0 0 6px rgba(95,211,154,0); } }
+  #toolbar button, #strip button, #panes, #ctxPanel, #ctxPanel *, dialog button, dialog input, dialog summary { -webkit-app-region: no-drag; }
+  .group { display:flex; gap:2px; padding:2px; border:1px solid var(--line); border-radius:9px; background:rgba(255,255,255,.03); }
+  button.src { position:relative; width:34px; height:30px; padding:0; font-size:15px; background:transparent; border-color:transparent; color:var(--mut); }
+  button.src:hover { color:var(--fg); background:rgba(255,255,255,.08); border-color:transparent; }
+  button.src .src-dot { position:absolute; top:3px; right:4px; width:8px; height:8px; border-radius:50%; background:transparent; }
+  button.src.on { color:var(--fg); }
+  button.src.on .src-dot { background:#ff8a3d; box-shadow:0 0 0 2px rgba(255,138,61,.25); animation:pulseo 1.6s ease-in-out infinite; }
+  @keyframes pulseo { 50% { box-shadow:0 0 0 5px rgba(255,138,61,0); } }
+  button.tb { display:inline-flex; align-items:center; gap:6px; padding:4px 6px 4px 10px; font-size:12.5px; font-weight:600;
+              background:rgba(255,255,255,.05); border-color:var(--line); white-space:nowrap; }
+  button.tb kbd { font-weight:500; }
+  .move { color:var(--dim); font-size:15px; padding:0 4px; cursor:move; }
+  .timer { font-size:12.5px; color:var(--mut); font-variant-numeric:tabular-nums; white-space:nowrap; padding:0 4px; }
+  .timer.live { color:var(--fg); }
+  button.exit { background:var(--danger); border-color:var(--danger); color:#fff; font-weight:700; padding:5px 12px; }
+  button.exit:hover { background:#f06a6a; border-color:#f06a6a; }
 
   /* --- buttons --- */
   button { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:8px;
            padding:6px 12px; font:inherit; font-size:12px; cursor:pointer; transition:background .15s, border-color .15s, color .15s; }
   button:hover { border-color: var(--acc); background:rgba(110,168,254,.12); }
   button:active { transform:translateY(1px); }
-  button:disabled { opacity:.5; cursor:not-allowed; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
   button.primary { background:var(--acc); color:var(--acc-ink); border-color:var(--acc); font-weight:600; }
   button.primary:hover { background:#8bbaff; }
-  button.danger { background:rgba(224,85,85,.18); border-color:rgba(224,85,85,.55); color:#ffc9c9; font-weight:600; }
-  button.danger:hover { background:rgba(224,85,85,.3); }
   button.icon { width:30px; height:30px; padding:0; display:inline-grid; place-items:center; font-size:14px;
                 background:transparent; border-color:transparent; color:var(--mut); }
   button.icon:hover { color:var(--fg); background:rgba(255,255,255,.08); border-color:transparent; }
@@ -46,30 +53,79 @@
   button.icon.close:hover { background:var(--danger); color:#fff; }
   .sep { width:1px; height:18px; background:var(--line); margin:0 2px; }
   :where(button, input, textarea, summary):focus-visible { outline:2px solid var(--acc); outline-offset:2px; }
+  kbd { font-family:inherit; font-size:10.5px; padding:1px 5px; border-radius:4px; border:1px solid var(--line-strong);
+        background:rgba(255,255,255,.08); color:var(--fg); }
+  .muted { color:var(--mut); font-size:11.5px; }
 
-  /* --- status --- */
-  #status { padding:5px 12px; font-size:11.5px; color:var(--mut); border-bottom:1px solid var(--line);
-            white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  #status.err { color:var(--err); background:rgba(255,128,128,.07); }
   #ctBanner { display:none; padding:6px 12px; font-size:11.5px; line-height:1.5; background:rgba(242,196,107,.14);
               color:var(--warn); border-bottom:1px solid rgba(242,196,107,.25); }
   #app.click-through #ctBanner { display:block; }
-  kbd { font-family:inherit; font-size:10.5px; padding:1px 5px; border-radius:4px; border:1px solid var(--line-strong);
-        background:rgba(255,255,255,.06); color:var(--fg); }
 
-  /* --- main panels --- */
-  main { flex:1; display:flex; flex-direction:column; gap:8px; padding:10px; overflow:hidden; min-height:0; }
-  .panel { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:10px 12px; overflow:auto; }
-  .panel h2 { margin:0 0 6px; font-size:10.5px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:var(--mut); }
-  #answer { flex:1; font-size:14.5px; line-height:1.55; white-space:pre-wrap; border-color:rgba(110,168,254,.22); }
-  #answer h2 { color:var(--acc); }
-  #answer.generating h2::after { content:' · escribiendo…'; color:var(--mut); font-weight:400; letter-spacing:0; text-transform:none;
-    animation:blink 1.2s ease-in-out infinite; }
+  /* --- strip: level meter, live transcript chips, status, clear --- */
+  #strip { display:flex; align-items:center; gap:8px; padding:6px 8px; flex:none; min-width:0; }
+  .meter { display:inline-flex; align-items:center; gap:2px; height:28px; padding:0 8px; border-radius:7px;
+           background:rgba(255,255,255,.04); border:1px solid var(--line); flex:none; }
+  .meter i { width:3px; height:calc(4px + var(--lv, 0) * 16px); border-radius:2px; background:var(--dim); transition:height .08s linear; }
+  .meter.on i { background:var(--ok); }
+  .chips { flex:1; min-width:0; display:flex; gap:6px; justify-content:flex-end; overflow:hidden; white-space:nowrap;
+           -webkit-mask-image:linear-gradient(90deg, transparent, #000 40px); }
+  .chip { flex:none; padding:4px 9px; border-radius:7px; background:rgba(255,255,255,.07); font-size:12.5px; color:#d9deea; }
+  .chip.me { background:rgba(110,168,254,.14); }
+  .chip.interim { opacity:.6; font-style:italic; }
+  .pill { flex:none; display:inline-flex; align-items:center; gap:6px; max-width:280px; padding:4px 10px; border-radius:999px;
+          border:1px solid var(--line); background:rgba(255,255,255,.04); font-size:12px; color:var(--mut);
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pill::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; flex:none; }
+  .pill.err { color:var(--err); border-color:rgba(255,128,128,.35); }
+  .pill.busy { color:var(--acc); }
+
+  /* --- panes (expanded layout) --- */
+  #panes { flex:1; min-height:0; display:grid; grid-template-columns:minmax(220px, 38%) 1fr; gap:8px; padding:0 8px 8px; }
+  #app.compact #panes { display:none; }
+  #app:not(.compact) .chips { visibility:hidden; }
+  .pane { min-height:0; display:flex; flex-direction:column; background:var(--card); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
+  .pane-head { display:flex; align-items:center; gap:6px; padding:6px 8px; border-bottom:1px solid var(--line); flex:none; }
+  .pane-head .spacer { flex:1; }
+  .lang { font-size:12px; color:var(--mut); padding:0 4px; }
+
+  .tx-list { flex:1; min-height:0; overflow:auto; display:flex; flex-direction:column; gap:10px; padding:10px; }
+  .tx-empty { margin:auto; color:var(--dim); font-style:italic; font-size:12.5px; text-align:center; }
+  .msg { max-width:88%; display:flex; flex-direction:column; gap:3px; }
+  .msg .txt { font-size:13px; line-height:1.45; color:#e3e7f0; }
+  .msg .who { font-size:10.5px; color:var(--dim); }
+  .msg.them { align-self:flex-start; }
+  .msg.them .txt { font-weight:600; }
+  .msg.me { align-self:flex-end; text-align:right; }
+  .msg.me .txt { color:#c9cfdc; }
+  .msg.interim .txt { opacity:.6; font-style:italic; }
+  .msg .q { color:var(--ok); }
+  .msg .q::after { content:" ●"; }
+
+  .ans-body { flex:1; min-height:0; overflow:auto; padding:12px 16px; }
+  .ans-title { font-size:15px; font-weight:700; line-height:1.35; padding-left:10px; border-left:3px solid var(--acc); margin-bottom:10px; }
+  .ans-title:empty { display:none; }
+  .ans-content { font-size:14.5px; line-height:1.55; }
+  .ans-content p { margin:0 0 .6em; }
+  .ans-content ul { margin:0; padding-left:1.2em; }
+  .ans-content li { margin:0 0 .6em; }
+  .ans-content li::marker { color:var(--acc); }
+  .ans-content.empty { color:var(--dim); font-style:italic; font-size:12.5px; }
+  #ansPane.generating .ans-title::after { content:" · escribiendo…"; color:var(--mut); font-weight:400; animation:blink 1.2s ease-in-out infinite; }
   @keyframes blink { 50% { opacity:.35; } }
-  #transcript { flex:0 1 24%; min-height:90px; font-size:12px; line-height:1.45; color:#c3c9d7; white-space:pre-wrap; }
-  .empty { color:var(--dim); font-style:italic; font-size:12.5px; }
-  footer { display:flex; align-items:center; gap:8px; padding:8px 10px; border-top:1px solid var(--line); }
-  footer #toggle { flex:1; min-height:34px; font-size:13px; }
+  .ans-foot { display:flex; align-items:center; gap:6px; padding:4px 8px; border-top:1px solid var(--line); flex:none; }
+  .ans-foot .spacer { flex:1; }
+  button.pill-btn { border-radius:999px; padding:4px 11px; font-size:12px; color:var(--mut); background:rgba(255,255,255,.04); }
+  button.pill-btn.on { color:var(--ok); border-color:rgba(95,211,154,.4); background:rgba(95,211,154,.1); }
+  button.pill-btn.mine.on { color:var(--mine); border-color:rgba(196,155,255,.45); background:rgba(196,155,255,.12); }
+  /* answers to your own questions: violet accent + badge */
+  #ansPane.mine { border-color:rgba(196,155,255,.4); }
+  #ansPane.mine .ans-body { background:linear-gradient(180deg, rgba(196,155,255,.09), transparent 120px); }
+  #ansPane.mine .ans-title { border-left-color:var(--mine); }
+  #ansPane.mine .ans-title::before { content:"TU PREGUNTA"; display:block; margin-bottom:3px; font-size:10px; font-weight:700;
+    letter-spacing:.09em; color:var(--mine); }
+  #ansPane.mine .ans-content li::marker { color:var(--mine); }
+  #ansPane.mine #ansMeta { color:var(--mine); }
+  .msg.me .q { color:var(--mine); }
   ::-webkit-scrollbar { width:8px; height:8px; }
   ::-webkit-scrollbar-thumb { background:rgba(255,255,255,.14); border-radius:8px; }
   ::-webkit-scrollbar-track { background:transparent; }
@@ -178,28 +234,57 @@
 </style>
 </head>
 <body>
-  <div id="app">
-    <header>
-      <span class="title"><span id="liveDot" class="dot" aria-hidden="true"></span>Asistente <span class="grip">· arrastra para mover</span></span>
+  <div id="app" class="compact">
+    <div id="toolbar">
+      <div class="group" role="group" aria-label="Fuentes de audio">
+        <button id="sysBtn" class="src" title="Escuchar al entrevistador (audio del sistema)" aria-label="Audio del sistema" aria-pressed="false">🖥<span class="src-dot"></span></button>
+        <button id="micBtn" class="src" title="Transcribir tu micrófono" aria-label="Micrófono" aria-pressed="false">🎙<span class="src-dot"></span></button>
+      </div>
+      <button id="answerBtn" class="tb" title="Pedir respuesta ahora (Ctrl+Shift+Enter)">Responder <kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>↵</kbd></button>
       <span class="spacer"></span>
-      <button id="practiceOpen" class="icon" title="Práctica de entrevista" aria-label="Práctica de entrevista">🎤</button>
+      <span class="move" title="Arrastra para mover" aria-hidden="true">✥</span>
+      <button id="layoutBtn" class="icon" title="Expandir" aria-label="Expandir">⤢</button>
+      <span id="timer" class="timer" title="Duración de la sesión">⏱ 00:00</span>
+      <span class="sep" aria-hidden="true"></span>
       <button id="settings" class="icon" title="Configuración (CV, cargo, formato)" aria-label="Configuración">⚙</button>
+      <button id="practiceOpen" class="icon" title="Práctica de entrevista" aria-label="Práctica de entrevista">🎤</button>
       <button id="captureToggle" class="icon capture-toggle" title="Oculto en capturas de pantalla. Clic para mostrarlo" aria-label="Mostrar en capturas de pantalla" aria-pressed="false">📷</button>
       <button id="clickthru" class="icon" title="Paso del ratón: los clics atraviesan la ventana (Ctrl+Shift+M)" aria-label="Paso del ratón" aria-pressed="false">🖱</button>
-      <span class="sep" aria-hidden="true"></span>
       <button id="minimize" class="icon" title="Ocultar (Ctrl+Shift+Space para volver)" aria-label="Ocultar">—</button>
-      <button id="close" class="icon close" title="Cerrar asistente (Ctrl+Shift+Q)" aria-label="Cerrar asistente">✕</button>
-    </header>
-    <div id="status" role="status" aria-live="polite">Iniciando…</div>
+      <button id="close" class="exit" title="Cerrar asistente (Ctrl+Shift+Q)">Salir</button>
+    </div>
     <div id="ctBanner">Paso del ratón activo: la ventana no recibe clics. Pulsa <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> para desactivarlo o usa el icono de la bandeja.</div>
-    <main>
-      <div class="panel" id="answer"><h2>Respuesta sugerida</h2><div id="ans" class="empty">Las sugerencias aparecerán aquí cuando el entrevistador haga una pregunta.</div></div>
-      <div class="panel" id="transcript"><h2>Transcripción</h2><div id="tx" class="empty">Pulsa «Iniciar escucha» para comenzar.</div></div>
+    <div id="strip">
+      <span id="meter" class="meter" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <div id="chips" class="chips" aria-hidden="true"></div>
+      <span id="status" class="pill" role="status" aria-live="polite">Iniciando…</span>
+      <button id="clear" class="tb" title="Borrar transcripción y respuestas (Ctrl+Shift+Backspace)">Limpiar <kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>⌫</kbd></button>
+    </div>
+    <main id="panes">
+      <section class="pane" aria-label="Transcripción">
+        <div class="pane-head"><span class="lang">🌐 Español</span><span class="spacer"></span></div>
+        <div id="txList" class="tx-list"><div class="tx-empty">Pulsa 🖥 para escuchar al entrevistador y 🎙 para tu voz.</div></div>
+      </section>
+      <section id="ansPane" class="pane" aria-label="Respuesta sugerida">
+        <div class="pane-head">
+          <button id="prevAns" class="tb" title="Respuesta anterior (Ctrl+←)" disabled><kbd>Ctrl</kbd> ←</button>
+          <button id="nextAns" class="tb" title="Respuesta siguiente (Ctrl+→)" disabled><kbd>Ctrl</kbd> →</button>
+          <span id="ansPos" class="muted"></span>
+          <span class="spacer"></span>
+          <button id="mineBtn" class="pill-btn mine on" title="Sugerir también respuestas a las preguntas que haces tú (micrófono)" aria-pressed="true">● Mis preguntas</button>
+          <button id="autoBtn" class="pill-btn on" title="Responder automáticamente al terminar cada pregunta del entrevistador" aria-pressed="true">● Auto respuesta</button>
+        </div>
+        <div class="ans-body">
+          <div id="ansTitle" class="ans-title"></div>
+          <div id="ans" class="ans-content empty">Las sugerencias aparecerán aquí cuando el entrevistador haga una pregunta.</div>
+        </div>
+        <div class="ans-foot">
+          <button id="copyAns" class="icon" title="Copiar respuesta" aria-label="Copiar respuesta" disabled>⧉</button>
+          <span class="spacer"></span>
+          <span id="ansMeta" class="muted"></span>
+        </div>
+      </section>
     </main>
-    <footer>
-      <button id="toggle" class="primary">▶ Iniciar escucha</button>
-      <button id="clear" title="Borrar transcripción y sugerencia">Limpiar</button>
-    </footer>
 
     <div id="ctxPanel" role="dialog" aria-modal="true" aria-labelledby="ctxTitle" hidden>
       <div class="ctx-head">
@@ -333,7 +418,6 @@
       </div>
     </dialog>
   </div>
-  <script src="question.js"></script>
   <script src="deepgram.js"></script>
   <script src="renderer.js"></script>
 </body>

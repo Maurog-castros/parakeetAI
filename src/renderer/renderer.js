@@ -3,19 +3,13 @@ const SR = 16000;
 const SEND_SAMPLES = 3200; // ~200ms per WS frame
 
 const el = (id) => document.getElementById(id);
-const txEl = el('tx'), ansEl = el('ans'), statusEl = el('status');
+const appEl = el('app'), statusEl = el('status');
+const txList = el('txList'), chipsEl = el('chips'), ansEl = el('ans');
 
-let running = false;
-let ctx = null, node = null, srcNode = null, stream = null;
 let clickThrough = false;
-let sttLang = 'es', dgKey = '', dgModel = 'nova-2';
-
-let committed = '';     // finalized transcript
-let interimText = '';   // live partial
-let utteranceText = ''; // finals of the current interviewer turn (question detection)
-let triggeredText = ''; // utterance text already sent to the LLM (avoid duplicates)
-let suggestTimer = null;
-let suggestSeq = 0;     // id of the newest live suggestion request
+let sttLang = 'es', sttUrl = '', sttKey = '', sttModel = 'nova-2';
+let responseChars = 500; // answer length limit (from settings)
+let running = false;     // any live source (system audio or mic) active
 
 let practiceHistory = [];
 let practiceQuestion = '';
@@ -26,36 +20,10 @@ let practiceInterim = '';
 let practiceCtx = null, practiceNode = null, practiceSource = null, practiceStream = null;
 let practiceAudio = null;
 
-// Question detection lives in question.js (window.Question).
-const { needsAnswer, isClearQuestionEnd } = window.Question;
-
-// pcm send buffer
-let pcm = new Float32Array(0);
-
-function setStatus(msg, err) {
-  statusEl.textContent = msg;
-  statusEl.classList.toggle('err', !!err);
-  el('liveDot').classList.toggle('err', !!err);
-}
-
-function setPlaceholder(target, text) {
-  target.textContent = text;
-  target.classList.add('empty');
-}
-function setContent(target, text) {
-  target.textContent = text;
-  target.classList.remove('empty');
-}
-const ANS_EMPTY = 'Las sugerencias aparecerán aquí cuando el entrevistador haga una pregunta.';
-const TX_EMPTY_IDLE = 'Pulsa «Iniciar escucha» para comenzar.';
-const TX_EMPTY_LIVE = 'Escuchando el audio del sistema…';
-
-function render() {
-  const live = interimText ? (committed ? committed + ' ' : '') + interimText : committed;
-  if (!live) setPlaceholder(txEl, running ? TX_EMPTY_LIVE : TX_EMPTY_IDLE);
-  else setContent(txEl, live.slice(-1400));
-  txEl.parentElement.scrollTop = txEl.parentElement.scrollHeight;
-}
+// Two gateway connections: the interviewer (system audio, with suggestions)
+// and you (microphone, text only). The gateway allows exactly 2 at once.
+const conns = { them: window.createSTT('them'), me: window.createSTT('me') };
+const sources = { them: null, me: null }; // active audio pipelines
 
 function toInt16(f32) {
   const i = new Int16Array(f32.length);
@@ -63,132 +31,456 @@ function toInt16(f32) {
   return i;
 }
 
-function onBlock(block) {
-  if (!running) return;
-  const merged = new Float32Array(pcm.length + block.length);
-  merged.set(pcm, 0); merged.set(block, pcm.length); pcm = merged;
-  while (pcm.length >= SEND_SAMPLES) {
-    const frame = pcm.slice(0, SEND_SAMPLES);
-    pcm = pcm.slice(SEND_SAMPLES);
-    window.DG.send(toInt16(frame).buffer);
+// --- status pill ---
+// kind: true/'err' for errors, 'busy' while generating, falsy otherwise.
+function setStatus(msg, kind) {
+  statusEl.textContent = msg;
+  statusEl.title = msg;
+  statusEl.classList.toggle('err', kind === true || kind === 'err');
+  statusEl.classList.toggle('busy', kind === 'busy');
+}
+const idleStatus = () => (autoAnswer ? 'Auto respuesta activa' : 'Auto respuesta desactivada');
+
+// --- layout: compact bar <-> expanded panes ---
+function compactHeight() {
+  return el('toolbar').offsetHeight + el('strip').offsetHeight + (clickThrough ? el('ctBanner').offsetHeight : 0) + 2;
+}
+function setLayout(mode) {
+  const compact = mode === 'compact';
+  appEl.classList.toggle('compact', compact);
+  el('layoutBtn').textContent = compact ? '⤢' : '⤡';
+  el('layoutBtn').title = compact ? 'Expandir' : 'Contraer';
+  el('layoutBtn').setAttribute('aria-label', compact ? 'Expandir' : 'Contraer');
+  window.api.setLayout(compact ? 'compact' : 'expanded', compactHeight());
+}
+const isCompact = () => appEl.classList.contains('compact');
+el('layoutBtn').onclick = () => setLayout(isCompact() ? 'expanded' : 'compact');
+
+// --- session timer ---
+let timerStart = 0, timerHandle = null;
+function tickTimer() {
+  const s = Math.floor((Date.now() - timerStart) / 1000);
+  el('timer').textContent = '⏱ ' + String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+}
+function updateRunning() {
+  running = !!(sources.them || sources.me);
+  el('timer').classList.toggle('live', running);
+  el('meter').classList.toggle('on', running);
+  if (running && !timerHandle) { timerStart = Date.now(); tickTimer(); timerHandle = setInterval(tickTimer, 1000); }
+  if (!running && timerHandle) { clearInterval(timerHandle); timerHandle = null; setMeter(0); }
+  window.api.setLiveShortcuts(!!sources.them);
+  window.api.setLiveState({ them: !!sources.them, me: !!sources.me });
+}
+
+// --- level meter ---
+const meterBars = Array.from(el('meter').children);
+const BAR_SHAPE = [0.55, 1, 0.75, 0.45];
+let meterLevel = 0, meterQueued = false;
+function setMeter(level) {
+  meterBars.forEach((b, i) => b.style.setProperty('--lv', Math.min(1, level * BAR_SHAPE[i]).toFixed(2)));
+}
+function feedMeter(block) {
+  let sum = 0;
+  for (let i = 0; i < block.length; i += 4) sum += block[i] * block[i];
+  const rms = Math.sqrt(sum / (block.length / 4));
+  meterLevel = Math.max(meterLevel * 0.8, Math.min(1, rms * 6));
+  if (!meterQueued) { meterQueued = true; requestAnimationFrame(() => { meterQueued = false; setMeter(meterLevel); }); }
+}
+
+// --- transcript: chat bubbles (expanded) + chips (compact) ---
+const WHO_LABEL = { them: 'Entrevistador', me: 'Tú' };
+let bubbles = [];                          // [{who, el, txt, whoEl}]
+const openBubble = { them: null, me: null }; // bubble still receiving finals
+const interimEl = { them: null, me: null };
+const hhmm = (d) => d.toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' });
+
+function txEmpty(on) {
+  const e = txList.querySelector('.tx-empty');
+  if (e) e.hidden = !on;
+}
+function scrollTx() { txList.scrollTop = txList.scrollHeight; }
+
+function addChip(who, text, interim) {
+  let chip = interim ? chipsEl.querySelector('.chip.interim.' + who) : null;
+  if (!chip) {
+    chip = document.createElement('span');
+    chip.className = 'chip ' + who + (interim ? ' interim' : '');
+    chipsEl.appendChild(chip);
+  }
+  chip.textContent = text;
+  if (interim) chipsEl.appendChild(chip); // keep the live partial last
+  while (chipsEl.children.length > 8) chipsEl.firstChild.remove();
+}
+function dropInterim(who) {
+  if (interimEl[who]) { interimEl[who].remove(); interimEl[who] = null; }
+  const chip = chipsEl.querySelector('.chip.interim.' + who);
+  if (chip) chip.remove();
+}
+function makeMsg(who, extraClass) {
+  const m = document.createElement('div');
+  m.className = 'msg ' + who + (extraClass ? ' ' + extraClass : '');
+  const txt = document.createElement('div'); txt.className = 'txt';
+  const whoEl = document.createElement('div'); whoEl.className = 'who';
+  whoEl.textContent = WHO_LABEL[who] + ' · ' + hhmm(new Date());
+  m.append(txt, whoEl);
+  return { el: m, txt, whoEl };
+}
+function addFinal(who, text) {
+  dropInterim(who);
+  txEmpty(false);
+  let b = openBubble[who];
+  if (!b) {
+    b = Object.assign({ who, text: '' }, makeMsg(who));
+    bubbles.push(b);
+    openBubble[who] = b;
+    txList.appendChild(b.el);
+  }
+  b.text += (b.text ? ' ' : '') + text;
+  b.txt.textContent = b.text;
+  addChip(who, text, false);
+  scrollTx();
+}
+function setInterim(who, text) {
+  if (!text) { dropInterim(who); return; }
+  txEmpty(false);
+  if (!interimEl[who]) interimEl[who] = makeMsg(who, 'interim').el;
+  interimEl[who].querySelector('.txt').textContent = text;
+  txList.appendChild(interimEl[who]); // stays at the bottom
+  addChip(who, text, true);
+  scrollTx();
+}
+function closeBubble(who) { openBubble[who] = null; }
+function markQuestion(who) {
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i];
+    if (b.who !== who) continue;
+    if (!b.whoEl.querySelector('.q')) {
+      const q = document.createElement('span'); q.className = 'q'; q.textContent = ' · Pregunta detectada';
+      b.whoEl.appendChild(q);
+    }
+    return;
   }
 }
 
+// --- answers: history with navigation ---
 const isNoAnswer = (t) => !t || /^[-—–\s.]+$/.test(t);
+let answers = [];   // [{id, who, question, text, mode, time, done}]
+let view = -1;      // index of the answer on screen
+let autoAnswer = true;   // interviewer: answer each phrase automatically
+let mineAnswers = true;  // also answer the questions *you* ask (microphone)
+let manualPending = false;
+try {
+  autoAnswer = localStorage.getItem('autoAnswer') !== 'off';
+  mineAnswers = localStorage.getItem('mineAnswers') !== 'off';
+} catch (_) {}
 
-// delayMs: 0 when the question is unambiguous, small debounce otherwise.
-function scheduleSuggest(delayMs) {
-  clearTimeout(suggestTimer);
-  suggestTimer = setTimeout(async () => {
-    const ctxText = committed.slice(-800);
-    if (!ctxText.trim()) return;
-    const id = ++suggestSeq;
-    setStatus('Generando sugerencia…');
-    ansEl.parentElement.classList.add('generating');
-    const res = await window.api.suggestStream(ctxText, id);
-    if (id !== suggestSeq || res.aborted) return; // a newer question took over
-    ansEl.parentElement.classList.remove('generating');
-    if (!res.ok) { setStatus('LLM: ' + res.error, true); return; }
-    const t = (res.text || '').trim();
-    if (!isNoAnswer(t)) setContent(ansEl, t);   // keep previous if "no answer"
-    setStatus('Escuchando…');
-  }, delayMs);
+// Gateway output is capped by tokens; keep the configured character limit too.
+function limitChars(text) {
+  const clean = String(text || '').trim();
+  if (clean.length <= responseChars) return clean;
+  const room = responseChars - 1;
+  const cut = clean.slice(0, room);
+  const sp = cut.lastIndexOf(' ');
+  return (sp >= room * 0.65 ? cut.slice(0, sp) : cut).trimEnd() + '…';
 }
+// Paragraph lines -> <p>, "• "/"- " lines -> one <ul> per run of bullets.
+function formatAnswer(target, text) {
+  target.replaceChildren();
+  let ul = null;
+  for (const raw of String(text).split(/\n+/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const bullet = line.match(/^(?:[•●▪*]|-(?=\s))\s*(.*)$/);
+    if (bullet) {
+      if (!ul) { ul = document.createElement('ul'); target.appendChild(ul); }
+      const li = document.createElement('li'); li.textContent = bullet[1]; ul.appendChild(li);
+    } else {
+      ul = null;
+      const p = document.createElement('p'); p.textContent = line; target.appendChild(p);
+    }
+  }
+}
+const ANS_EMPTY = 'Las sugerencias aparecerán aquí cuando el entrevistador haga una pregunta.';
+function renderAnswer() {
+  const a = answers[view];
+  el('prevAns').disabled = view <= 0;
+  el('nextAns').disabled = view < 0 || view >= answers.length - 1;
+  el('ansPos').textContent = answers.length ? (view + 1) + ' / ' + answers.length : '';
+  el('ansPane').classList.toggle('generating', !!(a && !a.done));
+  el('ansPane').classList.toggle('mine', !!(a && a.who === 'me'));
+  if (!a) {
+    el('ansTitle').textContent = '';
+    ansEl.textContent = ANS_EMPTY;
+    ansEl.classList.add('empty');
+    el('ansMeta').textContent = '';
+    el('copyAns').disabled = true;
+    return;
+  }
+  const q = String(a.question || '').trim();
+  el('ansTitle').textContent = q.length > 160 ? q.slice(0, 159) + '…' : q;
+  const t = a.text.trim();
+  if (t.length < 3 || isNoAnswer(t)) { ansEl.textContent = 'Pensando…'; ansEl.classList.add('empty'); }
+  else { formatAnswer(ansEl, limitChars(t)); ansEl.classList.remove('empty'); }
+  const label = a.who === 'me' ? 'Tu pregunta' : a.mode === 'manual' ? 'Respuesta (manual)' : 'Respuesta (auto)';
+  el('ansMeta').textContent = label + ' · ' + hhmm(a.time);
+  el('copyAns').disabled = !a.done;
+}
+function showAnswer(i) {
+  if (!answers.length) return;
+  view = Math.max(0, Math.min(answers.length - 1, i));
+  renderAnswer();
+}
+function removeAnswer(a) {
+  const i = answers.indexOf(a);
+  if (i < 0) return;
+  answers.splice(i, 1);
+  if (view > i) view--;
+  else if (view === i) view = Math.min(i, answers.length - 1);
+  renderAnswer();
+}
+el('prevAns').onclick = () => showAnswer(view - 1);
+el('nextAns').onclick = () => showAnswer(view + 1);
+el('copyAns').onclick = async () => {
+  const a = answers[view];
+  if (!a) return;
+  try { await navigator.clipboard.writeText(limitChars(a.text)); setStatus('Respuesta copiada'); }
+  catch (_) { setStatus('No se pudo copiar', true); }
+};
 
-// Streamed tokens: show the answer while it is being written.
-window.api.onSuggestDelta(({ id, text }) => {
-  if (id !== suggestSeq) return;
-  const t = (text || '').trim();
-  if (t.length < 3 || isNoAnswer(t)) return; // wait for real content ("—" means no answer)
-  setContent(ansEl, t);
-});
-
-function onInterviewerFinal(t) {
-  committed += (committed ? ' ' : '') + t;
-  utteranceText += (utteranceText ? ' ' : '') + t;
-  interimText = '';
-  render();
-  // Chunk ends with "?": answer now, don't wait for the end-of-turn silence.
-  if (isClearQuestionEnd(t) && needsAnswer(utteranceText)) {
-    triggeredText = utteranceText;
-    scheduleSuggest(0);
+// Live answers are generated by the voice gateway after each phrase
+// (suggest=auto) or on request (Suggest), and arrive on that source's socket:
+// start → delta* → end. A newer phrase cancels the one in flight; "—" means
+// "no answer needed". who: 'them' (interviewer) or 'me' (your own questions).
+function onGatewaySuggestion(who, m) {
+  if (m.status === 'start') {
+    const followLatest = view === answers.length - 1;
+    const mode = who === 'me' ? 'mine' : manualPending ? 'manual' : 'auto';
+    answers.push({ id: m.id, who, question: m.transcript || '', text: '', mode, time: new Date(), done: false });
+    if (who === 'them') manualPending = false;
+    if (followLatest || view < 0) view = answers.length - 1;
+    setStatus('Generando respuesta…', 'busy');
+    renderAnswer();
+    return;
+  }
+  const a = answers.find((x) => x.id === m.id);
+  if (m.status === 'error' && /no hay texto nuevo/i.test(m.message || '')) {
+    if (who === 'them' && !answers.some((x) => !x.done)) setStatus('Sin texto nuevo para responder');
+    if (a) removeAnswer(a);
+    return;
+  }
+  if (!a) return;
+  if (m.status === 'delta') {
+    a.text += m.delta || '';
+    const t = a.text.trim();
+    if (t.length >= 3 && !isNoAnswer(t) && isCompact()) setLayout('expanded');
+    if (answers[view] === a) renderAnswer();
+    return;
+  }
+  a.done = true;
+  if (m.status === 'end') {
+    a.text = String(m.suggestion || a.text);
+    if (isNoAnswer(a.text.trim())) { removeAnswer(a); if (who === 'them') setStatus('Sin pregunta'); return; }
+    markQuestion(who);
+    setStatus(idleStatus());
+    renderAnswer();
+  } else if (m.status === 'cancelled') {
+    removeAnswer(a); // a newer phrase took over; its 'start' follows
+  } else if (m.status === 'error') {
+    removeAnswer(a);
+    setStatus('Respuesta: ' + (m.message || 'error'), true);
   }
 }
 
-function onInterviewerTurnEnd() {
-  const turn = utteranceText;
-  utteranceText = '';
-  if (!turn || turn === triggeredText) { triggeredText = ''; return; }
-  // Judge the whole turn, not just the last chunk (questions often span several).
-  if (needsAnswer(turn)) scheduleSuggest(triggeredText ? 0 : 120);
-  triggeredText = '';
+const suggestMode = (who) => (who === 'them' ? (autoAnswer ? 'auto' : 'manual') : (mineAnswers ? 'auto' : 'off'));
+
+// Sends rules + CV/JD to one connection (or both when who is omitted).
+async function configureGateway(resetHistory, who) {
+  const list = who ? [who] : ['them', 'me'];
+  await Promise.all(list.map(async (w) => {
+    const g = await window.api.gatewayConfig(resetHistory, w === 'me' ? 'candidate' : 'interviewer');
+    responseChars = g.responseChars || responseChars;
+    if (sources[w]) conns[w].configure(Object.assign({}, g.configure, { suggest: suggestMode(w) }));
+  }));
 }
 
-async function start() {
-  if (!dgKey) { setStatus('Falta DEEPGRAM_API_KEY en el archivo .env', true); return; }
+function applyAutoUi() {
+  const b = el('autoBtn');
+  b.classList.toggle('on', autoAnswer);
+  b.setAttribute('aria-pressed', String(autoAnswer));
+  b.textContent = autoAnswer ? '● Auto respuesta' : '○ Auto respuesta';
+}
+el('autoBtn').onclick = () => {
+  autoAnswer = !autoAnswer;
+  try { localStorage.setItem('autoAnswer', autoAnswer ? 'on' : 'off'); } catch (_) {}
+  applyAutoUi();
+  if (sources.them) configureGateway(false, 'them');
+  setStatus(idleStatus());
+};
+applyAutoUi();
+
+function applyMineUi() {
+  const b = el('mineBtn');
+  b.classList.toggle('on', mineAnswers);
+  b.setAttribute('aria-pressed', String(mineAnswers));
+  b.textContent = mineAnswers ? '● Mis preguntas' : '○ Mis preguntas';
+}
+el('mineBtn').onclick = () => {
+  mineAnswers = !mineAnswers;
+  try { localStorage.setItem('mineAnswers', mineAnswers ? 'on' : 'off'); } catch (_) {}
+  applyMineUi();
+  if (sources.me) configureGateway(false, 'me');
+  setStatus(mineAnswers ? 'También respondo tus preguntas' : 'Solo respuestas al entrevistador');
+};
+applyMineUi();
+
+// Ask for an answer now: close the phrase in progress, then request it.
+function answerNow() {
+  if (!sources.them) { setStatus('Activa 🖥 para escuchar al entrevistador', true); return; }
+  manualPending = true;
+  conns.them.control('Finalize');
+  setTimeout(() => conns.them.control('Suggest'), 200);
+  setStatus('Pidiendo respuesta…', 'busy');
+}
+el('answerBtn').onclick = answerNow;
+
+// --- audio sources ---
+// Worklet → 200 ms Int16 frames → its gateway connection (+ level meter).
+async function startPipeline(stream, conn) {
+  const ctx = new AudioContext({ sampleRate: SR });
+  await ctx.audioWorklet.addModule('recorder-worklet.js');
+  const src = ctx.createMediaStreamSource(stream);
+  const node = new AudioWorkletNode(ctx, 'recorder-worklet');
+  const silent = ctx.createGain();
+  silent.gain.value = 0;
+  let pcm = new Float32Array(0);
+  node.port.onmessage = (ev) => {
+    const block = ev.data;
+    feedMeter(block);
+    const merged = new Float32Array(pcm.length + block.length);
+    merged.set(pcm, 0); merged.set(block, pcm.length); pcm = merged;
+    while (pcm.length >= SEND_SAMPLES) {
+      conn.send(toInt16(pcm.slice(0, SEND_SAMPLES)).buffer);
+      pcm = pcm.slice(SEND_SAMPLES);
+    }
+  };
+  src.connect(node);
+  node.connect(silent).connect(ctx.destination);
+  return { stream, ctx, src, node };
+}
+async function stopPipeline(p) {
+  if (!p) return;
+  try { p.node.disconnect(); } catch (_) {}
+  try { p.src.disconnect(); } catch (_) {}
+  try { await p.ctx.close(); } catch (_) {}
+  try { p.stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+}
+function wireConn(who) {
+  const c = conns[who];
+  c.onFinal = (t) => addFinal(who, t);
+  c.onInterim = (t) => setInterim(who, t);
+  c.onUtterance = () => closeBubble(who);
+  c.onSuggestion = (m) => onGatewaySuggestion(who, m);
+  c.onStatus = (m, e) => { if (e) setStatus((who === 'me' ? 'Micrófono · ' : '') + m, true); };
+  // Dropped socket (e.g. gateway restart 1012): the connection retries by
+  // itself; answers in flight on it are lost, the rest of the session stays.
+  c.onReconnect = (state, code, delay) => {
+    const name = who === 'me' ? 'micrófono' : 'entrevistador';
+    if (state === 'reconnecting') {
+      dropInterim(who);
+      closeBubble(who);
+      answers.filter((a) => a.who === who && !a.done).forEach(removeAnswer);
+      setStatus('Reconectando ' + name + '… (' + code + ', ' + Math.round(delay / 1000) + ' s)', 'busy');
+    } else {
+      setStatus(who === 'them' ? idleStatus() : 'Micrófono reconectado');
+    }
+  };
+}
+function setSourceUi(who, on) {
+  const b = el(who === 'them' ? 'sysBtn' : 'micBtn');
+  b.classList.toggle('on', on);
+  b.setAttribute('aria-pressed', String(on));
+}
+
+async function startSource(who) {
+  if (!sttKey) { setStatus('Falta STT_TOKEN en el archivo .env', true); return; }
+  let stream = null;
   try {
-    setStatus('Conectando con el audio del sistema…');
-    const noDsp = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
-    stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: noDsp });
-    stream.getVideoTracks().forEach((t) => t.stop());
-    const audioStream = new MediaStream(stream.getAudioTracks());
-    const at = audioStream.getAudioTracks()[0];
-    if (!at) throw new Error('sin pista de audio (loopback)');
-    try { await at.applyConstraints(noDsp); } catch (_) {}
-    console.log('[cap] track', at.label, JSON.stringify(at.getSettings()));
-
-    // open Deepgram
-    utteranceText = triggeredText = '';
-    window.DG.onFinal = onInterviewerFinal;
-    window.DG.onInterim = (t) => { interimText = t; render(); };
-    window.DG.onUtterance = onInterviewerTurnEnd;
-    window.DG.onStatus = (m, e) => setStatus(m, e);
-    window.DG.open(dgKey, dgModel, sttLang);
-
-    ctx = new AudioContext({ sampleRate: SR });
-    await ctx.audioWorklet.addModule('recorder-worklet.js');
-    srcNode = ctx.createMediaStreamSource(audioStream);
-    node = new AudioWorkletNode(ctx, 'recorder-worklet');
-    node.port.onmessage = (ev) => onBlock(ev.data);
-    srcNode.connect(node);
-    node.connect(ctx.destination);
-
-    running = true;
-    el('toggle').textContent = '■ Detener escucha';
-    el('toggle').classList.remove('primary');
-    el('toggle').classList.add('danger');
-    el('liveDot').classList.add('live');
-    render();
+    if (who === 'them') {
+      setStatus('Conectando con el audio del sistema…');
+      const noDsp = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+      const display = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: noDsp });
+      display.getVideoTracks().forEach((t) => t.stop());
+      stream = new MediaStream(display.getAudioTracks());
+      const at = stream.getAudioTracks()[0];
+      if (!at) throw new Error('sin pista de audio (loopback)');
+      try { await at.applyConstraints(noDsp); } catch (_) {}
+      console.log('[cap] track', at.label, JSON.stringify(at.getSettings()));
+    } else {
+      setStatus('Conectando con el micrófono…');
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    }
+    wireConn(who);
+    conns[who].open(sttUrl, sttKey, sttModel, sttLang, suggestMode(who));
+    sources[who] = await startPipeline(stream, conns[who]);
+    await configureGateway(true, who);
+    setSourceUi(who, true);
+    updateRunning();
+    setStatus(who === 'them' ? idleStatus() : 'Micrófono activo');
   } catch (err) {
-    console.error('[cap] start error', err.message || err);
-    setStatus('Error: ' + (err.message || err), true);
-    await stop();
+    console.error('[cap] start error', who, err.message || err);
+    try { if (stream) stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+    await stopSource(who);
+    setStatus((who === 'me' ? 'Micrófono: ' : 'Error: ') + (err.message || err), true);
   }
 }
-
+async function stopSource(who) {
+  const p = sources[who];
+  sources[who] = null;
+  try { conns[who].close(); } catch (_) {}
+  await stopPipeline(p);
+  dropInterim(who);
+  closeBubble(who);
+  if (who === 'them') manualPending = false;
+  answers.filter((a) => a.who === who && !a.done).forEach(removeAnswer);
+  setSourceUi(who, false);
+  updateRunning();
+}
+// Stops everything (used before practice mode, which needs a connection).
 async function stop() {
-  running = false;
-  pcm = new Float32Array(0);
-  clearTimeout(suggestTimer);
-  suggestSeq++;
-  ansEl.parentElement.classList.remove('generating');
-  try { window.DG.close(); } catch (_) {}
-  try { if (node) node.disconnect(); } catch (_) {}
-  try { if (srcNode) srcNode.disconnect(); } catch (_) {}
-  try { if (ctx) await ctx.close(); } catch (_) {}
-  try { if (stream) stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
-  node = srcNode = ctx = stream = null;
-  el('toggle').textContent = '▶ Iniciar escucha';
-  el('toggle').classList.remove('danger');
-  el('toggle').classList.add('primary');
-  el('liveDot').classList.remove('live');
-  render();
+  await Promise.all([stopSource('them'), stopSource('me')]);
   if (!statusEl.classList.contains('err')) setStatus('Detenido');
 }
 
+el('sysBtn').onclick = () => (sources.them ? stopSource('them').then(() => setStatus('Entrevistador en pausa')) : startSource('them'));
+el('micBtn').onclick = () => (sources.me ? stopSource('me').then(() => setStatus('Micrófono apagado')) : startSource('me'));
+
+function clearAll() {
+  bubbles = []; openBubble.them = openBubble.me = null; interimEl.them = interimEl.me = null;
+  txList.querySelectorAll('.msg').forEach((m) => m.remove());
+  txEmpty(true);
+  chipsEl.replaceChildren();
+  answers = []; view = -1; renderAnswer();
+  configureGateway(true); // forget previous turns on the gateway too
+  setStatus(running ? idleStatus() : 'Limpio');
+}
+el('clear').onclick = clearAll;
+
+// Global shortcuts (only registered while listening) arrive from main.
+window.api.onShortcut((name) => {
+  if (name === 'answer') answerNow();
+  else if (name === 'clear') clearAll();
+});
+document.addEventListener('keydown', (ev) => {
+  if (!ev.ctrlKey || ev.altKey || ev.metaKey) return;
+  if (ev.target && /^(TEXTAREA|INPUT)$/.test(ev.target.tagName)) return;
+  if (ev.key === 'ArrowLeft') { ev.preventDefault(); showAnswer(view - 1); }
+  else if (ev.key === 'ArrowRight') { ev.preventDefault(); showAnswer(view + 1); }
+  else if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); answerNow(); }
+});
+
 // --- wiring ---
-el('toggle').onclick = () => (running ? stop() : start());
-el('clear').onclick = () => { committed = ''; interimText = ''; render(); setPlaceholder(ansEl, ANS_EMPTY); };
 el('close').onclick = async () => { try { if (running) await stop(); } finally { window.api.quit(); } };
 el('minimize').onclick = () => window.api.minimize();
 
@@ -197,6 +489,7 @@ function applyClickThroughUi(on) {
   el('clickthru').classList.toggle('active', on);
   el('clickthru').setAttribute('aria-pressed', String(on));
   document.getElementById('app').classList.toggle('click-through', on);
+  if (isCompact()) setLayout('compact'); // banner changes the bar height
 }
 el('clickthru').onclick = () => {
   applyClickThroughUi(!clickThrough);
@@ -241,6 +534,7 @@ function ctxInfoText() {
 }
 function closeCtxPanel() { el('ctxPanel').hidden = true; el('settings').focus(); }
 el('settings').onclick = async () => {
+  if (isCompact()) setLayout('expanded'); // the panel needs the full window
   const c = await window.api.getContext();
   el('cv').value = c.cv || '';
   el('jd').value = c.jd || '';
@@ -270,6 +564,9 @@ el('ctxSave').onclick = async () => {
     shareInterfaceVisible: el('shareInterfaceVisible').checked,
   });
   if (r && r.ok) applyCaptureUi(r.shareInterfaceVisible === true);
+  // New CV/JD/rules apply now; reset the gateway's turn history (last 6 Q&A),
+  // otherwise old answers keep leaking the previous context.
+  if (r && r.ok) configureGateway(true);
   if (!r || !r.ok) {
     el('ctxInfo').className = 'err';
     el('ctxInfo').textContent = 'No se pudo guardar.';
@@ -278,7 +575,7 @@ el('ctxSave').onclick = async () => {
   const formatLabel = r.responseFormat === 'paragraph' ? 'texto continuo' : 'lista de puntos';
   el('ctxInfo').className = 'ok';
   el('ctxInfo').textContent = '✓ Guardado · ' + r.responseChars + ' caracteres · ' + formatLabel;
-  if (!running && !statusEl.classList.contains('err')) setStatus('Listo — pulsa «Iniciar escucha»');
+  if (!running && !statusEl.classList.contains('err')) setStatus('Listo — pulsa 🖥 para escuchar');
   setTimeout(closeCtxPanel, 700);
 };
 el('cv').oninput = ctxInfoText;
@@ -342,7 +639,7 @@ function practiceOnBlock(block) {
 }
 
 async function startPracticeMic() {
-  if (!dgKey) { setPracticeStatus('Falta DEEPGRAM_API_KEY.', true); return; }
+  if (!sttKey) { setPracticeStatus('Falta STT_TOKEN.', true); return; }
   try {
     practiceCommitted = '';
     practiceInterim = '';
@@ -357,8 +654,9 @@ async function startPracticeMic() {
     };
     window.DG.onInterim = (text) => { practiceInterim = text; renderPracticeAnswer(); };
     window.DG.onUtterance = null;
+    window.DG.onSuggestion = null;
     window.DG.onStatus = (message, error) => setPracticeStatus(message, error);
-    window.DG.open(dgKey, dgModel, sttLang);
+    window.DG.open(sttUrl, sttKey, sttModel, sttLang, 'off');
 
     practiceCtx = new AudioContext({ sampleRate: SR });
     await practiceCtx.audioWorklet.addModule('recorder-worklet.js');
@@ -519,7 +817,7 @@ el('practiceDialog').addEventListener('close', async () => {
   stopPracticeAudio();
   document.getElementById('app').classList.remove('practice-mode');
   window.api.setPracticeMode(false);
-  setStatus('Listo — pulsa «Iniciar escucha»');
+  setStatus('Listo — pulsa 🖥 para escuchar');
 });
 el('practiceStart').onclick = async () => {
   const count = el('practiceCount');
@@ -561,15 +859,17 @@ el('practiceAgain').onclick = () => {
 (async function init() {
   const c = await window.api.config();
   sttLang = c.sttLang || 'es';
-  dgKey = c.deepgramKey || '';
-  dgModel = c.deepgramModel || 'nova-2';
+  sttUrl = c.sttUrl || '';
+  sttKey = c.sttKey || '';
+  sttModel = c.sttModel || 'nova-2';
+  responseChars = (await window.api.gatewayConfig(false)).responseChars || responseChars;
   const missing = [];
   if (!c.hasKey) missing.push('IAMIKO_TOKEN');
-  if (!dgKey) missing.push('DEEPGRAM_API_KEY');
+  if (!sttKey) missing.push('STT_TOKEN');
   const ctx = await window.api.getContext();
   applyCaptureUi(ctx.shareInterfaceVisible === true);
   if (missing.length) setStatus('Falta configurar ' + missing.join(' y ') + ' en el archivo .env', true);
-  else if (!(ctx.cv || ctx.jd)) setStatus('Añade tu CV y el cargo en ⚙ Configuración, luego pulsa «Iniciar escucha»');
-  else setStatus('Listo — pulsa «Iniciar escucha»');
-  console.log('[app] ready | deepgram', !!dgKey, dgModel, '| chat', c.chatModel, '| lang', sttLang, '| cv', (ctx.cv || '').length, 'jd', (ctx.jd || '').length);
+  else if (!(ctx.cv || ctx.jd)) setStatus('Añade tu CV y el cargo en ⚙ Configuración, luego pulsa 🖥');
+  else setStatus('Listo — pulsa 🖥 para escuchar');
+  console.log('[app] ready | stt', sttUrl, !!sttKey, sttModel, '| chat', c.chatModel, '| lang', sttLang, '| cv', (ctx.cv || '').length, 'jd', (ctx.jd || '').length);
 })();
