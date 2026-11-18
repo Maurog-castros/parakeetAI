@@ -12,8 +12,10 @@ let sttLang = 'es', dgKey = '', dgModel = 'nova-2';
 
 let committed = '';     // finalized transcript
 let interimText = '';   // live partial
-let lastFinal = '';     // most recent final chunk (for question detection)
+let utteranceText = ''; // finals of the current interviewer turn (question detection)
+let triggeredText = ''; // utterance text already sent to the LLM (avoid duplicates)
 let suggestTimer = null;
+let suggestSeq = 0;     // id of the newest live suggestion request
 
 let practiceHistory = [];
 let practiceQuestion = '';
@@ -24,13 +26,8 @@ let practiceInterim = '';
 let practiceCtx = null, practiceNode = null, practiceSource = null, practiceStream = null;
 let practiceAudio = null;
 
-// Heuristic: does the interviewer's last line warrant an answer?
-function needsAnswer(text) {
-  if (!text) return false;
-  if (text.includes('?') || text.includes('¿')) return true;
-  const t = text.toLowerCase();
-  return /\b(qué|que|cómo|como|cuál|cual|cuándo|cuando|dónde|donde|quién|quien|por qué|porqué|cuéntame|cuentame|háblame|hablame|explica|explícame|explicame|describe|dime|platícame|coméntame|comentame|podrías|podrias|puedes|me puedes|hábleme|cuénteme|descríbeme|por que)\b/.test(t);
-}
+// Question detection lives in question.js (window.Question).
+const { needsAnswer, isClearQuestionEnd } = window.Question;
 
 // pcm send buffer
 let pcm = new Float32Array(0);
@@ -77,18 +74,54 @@ function onBlock(block) {
   }
 }
 
-function scheduleSuggest() {
+const isNoAnswer = (t) => !t || /^[-—–\s.]+$/.test(t);
+
+// delayMs: 0 when the question is unambiguous, small debounce otherwise.
+function scheduleSuggest(delayMs) {
   clearTimeout(suggestTimer);
   suggestTimer = setTimeout(async () => {
     const ctxText = committed.slice(-800);
     if (!ctxText.trim()) return;
+    const id = ++suggestSeq;
     setStatus('Generando sugerencia…');
-    const res = await window.api.suggest(ctxText);
+    ansEl.parentElement.classList.add('generating');
+    const res = await window.api.suggestStream(ctxText, id);
+    if (id !== suggestSeq || res.aborted) return; // a newer question took over
+    ansEl.parentElement.classList.remove('generating');
     if (!res.ok) { setStatus('LLM: ' + res.error, true); return; }
     const t = (res.text || '').trim();
-    if (t && !/^[-—–\s.]+$/.test(t)) setContent(ansEl, t);   // keep previous if "no answer"
+    if (!isNoAnswer(t)) setContent(ansEl, t);   // keep previous if "no answer"
     setStatus('Escuchando…');
-  }, 250);
+  }, delayMs);
+}
+
+// Streamed tokens: show the answer while it is being written.
+window.api.onSuggestDelta(({ id, text }) => {
+  if (id !== suggestSeq) return;
+  const t = (text || '').trim();
+  if (t.length < 3 || isNoAnswer(t)) return; // wait for real content ("—" means no answer)
+  setContent(ansEl, t);
+});
+
+function onInterviewerFinal(t) {
+  committed += (committed ? ' ' : '') + t;
+  utteranceText += (utteranceText ? ' ' : '') + t;
+  interimText = '';
+  render();
+  // Chunk ends with "?": answer now, don't wait for the end-of-turn silence.
+  if (isClearQuestionEnd(t) && needsAnswer(utteranceText)) {
+    triggeredText = utteranceText;
+    scheduleSuggest(0);
+  }
+}
+
+function onInterviewerTurnEnd() {
+  const turn = utteranceText;
+  utteranceText = '';
+  if (!turn || turn === triggeredText) { triggeredText = ''; return; }
+  // Judge the whole turn, not just the last chunk (questions often span several).
+  if (needsAnswer(turn)) scheduleSuggest(triggeredText ? 0 : 120);
+  triggeredText = '';
 }
 
 async function start() {
@@ -105,9 +138,10 @@ async function start() {
     console.log('[cap] track', at.label, JSON.stringify(at.getSettings()));
 
     // open Deepgram
-    window.DG.onFinal = (t) => { committed += (committed ? ' ' : '') + t; lastFinal = t; interimText = ''; render(); };
+    utteranceText = triggeredText = '';
+    window.DG.onFinal = onInterviewerFinal;
     window.DG.onInterim = (t) => { interimText = t; render(); };
-    window.DG.onUtterance = () => { if (needsAnswer(lastFinal)) scheduleSuggest(); };
+    window.DG.onUtterance = onInterviewerTurnEnd;
     window.DG.onStatus = (m, e) => setStatus(m, e);
     window.DG.open(dgKey, dgModel, sttLang);
 
@@ -136,6 +170,8 @@ async function stop() {
   running = false;
   pcm = new Float32Array(0);
   clearTimeout(suggestTimer);
+  suggestSeq++;
+  ansEl.parentElement.classList.remove('generating');
   try { window.DG.close(); } catch (_) {}
   try { if (node) node.disconnect(); } catch (_) {}
   try { if (srcNode) srcNode.disconnect(); } catch (_) {}

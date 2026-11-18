@@ -196,6 +196,32 @@ ipcMain.handle('config', () => {
   };
 });
 
+// Live interview answers: streamed token by token; a newer question cancels
+// the request still in flight so a stale answer never overwrites a fresh one.
+let liveSuggest = null;
+ipcMain.handle('suggest-stream', async (e, transcript, id) => {
+  if (liveSuggest) liveSuggest.abort();
+  const ctrl = new AbortController();
+  liveSuggest = ctrl;
+  let lastSent = 0;
+  const send = (text) => {
+    if (ctrl.signal.aborted || e.sender.isDestroyed()) return;
+    const now = Date.now();
+    if (now - lastSent < 40) return; // ~25 fps is plenty for text
+    lastSent = now;
+    e.sender.send('suggest-delta', { id, text });
+  };
+  try {
+    const text = await llm.suggest(transcript, context, send, ctrl.signal);
+    return { ok: true, text, id };
+  } catch (err) {
+    if (ctrl.signal.aborted) return { ok: false, aborted: true, id };
+    return { ok: false, error: String(err && err.message || err), id };
+  } finally {
+    if (liveSuggest === ctrl) liveSuggest = null;
+  }
+});
+
 ipcMain.handle('suggest', async (_e, transcript) => {
   try {
     const text = await llm.suggest(transcript, context);

@@ -109,7 +109,48 @@ function buildSystem(context) {
   ].filter((line) => line !== null).join('\n');
 }
 
-async function suggest(transcript, context) {
+// Strip reasoning blocks some models emit (e.g. Qwen "<think>…</think>").
+function stripThinking(text) {
+  return String(text || '').replace(/<think>[\s\S]*?(<\/think>|$)/gi, '').trimStart();
+}
+
+// Parse an OpenAI-style SSE body, calling onDelta(fullTextSoFar) per token.
+// Falls back to a plain JSON body if the gateway ignores stream:true.
+async function readCompletion(r, onDelta) {
+  const type = r.headers.get('content-type') || '';
+  if (!/event-stream/i.test(type) || !r.body) {
+    const j = await r.json();
+    const text = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content || '';
+    if (onDelta) onDelta(stripThinking(text));
+    return stripThinking(text);
+  }
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let full = '';
+  for await (const chunk of r.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let nl;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (data === '[DONE]') return stripThinking(full);
+      let j; try { j = JSON.parse(data); } catch (_) { continue; }
+      const delta = j.choices && j.choices[0] && (j.choices[0].delta || j.choices[0].message);
+      const piece = delta && delta.content;
+      if (piece) {
+        full += piece;
+        if (onDelta) onDelta(stripThinking(full));
+      }
+    }
+  }
+  return stripThinking(full);
+}
+
+// onDelta(partialText) receives the answer as it is generated (already
+// length-limited); signal (AbortSignal) cancels a stale request.
+async function suggest(transcript, context, onDelta, signal) {
   const c = cfg();
   if (!c.hasKey) throw new Error('token missing');
   const responseChars = normalizeResponseChars(context && context.responseChars);
@@ -121,16 +162,16 @@ async function suggest(transcript, context) {
     ],
     temperature: 0.3,
     max_tokens: Math.min(800, Math.max(96, Math.ceil(responseChars / 2))),
-    stream: false,
+    stream: !!onDelta,
   };
   const r = await fetch(`${c.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: headers({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
+    signal,
   });
   if (!r.ok) throw new Error(`chat -> ${r.status}: ${(await r.text()).slice(0, 200)}`);
-  const j = await r.json();
-  const text = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content || '';
+  const text = await readCompletion(r, onDelta && ((partial) => onDelta(limitResponse(partial, responseChars))));
   return limitResponse(text, responseChars);
 }
 
@@ -223,6 +264,8 @@ module.exports = {
   cfg,
   probe,
   suggest,
+  readCompletion,
+  stripThinking,
   buildSystem,
   limitResponse,
   normalizeResponseChars,

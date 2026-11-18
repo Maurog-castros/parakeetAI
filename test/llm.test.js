@@ -70,3 +70,26 @@ test('la evaluación exige evidencia y un plan concreto', () => {
   assert.match(prompt, /PLAN DE PRÁCTICA/);
   assert.match(prompt, /Automaticé un proceso/);
 });
+
+test('lee streaming SSE token a token y quita <think>', async () => {
+  const { readCompletion } = require('../src/llm');
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"<think>pienso</think>"}}]}',
+    'data: {"choices":[{"delta":{"content":"• Hola"}}]}',
+    'data: {"choices":[{"delta":{"content":" mundo"}}]}',
+    'data: [DONE]',
+    '',
+  ].join('\n');
+  const partials = [];
+  const r = new Response(sse, { headers: { 'content-type': 'text/event-stream' } });
+  const text = await readCompletion(r, (t) => partials.push(t));
+  assert.equal(text, '• Hola mundo');
+  assert.equal(partials.at(-1), '• Hola mundo');
+});
+
+test('si el gateway ignora stream, usa la respuesta JSON', async () => {
+  const { readCompletion } = require('../src/llm');
+  const r = new Response(JSON.stringify({ choices: [{ message: { content: 'Respuesta' } }] }),
+    { headers: { 'content-type': 'application/json' } });
+  assert.equal(await readCompletion(r, null), 'Respuesta');
+});
