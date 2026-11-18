@@ -134,6 +134,91 @@ async function suggest(transcript, context) {
   return limitResponse(text, responseChars);
 }
 
+async function chat(messages, options) {
+  const c = cfg();
+  if (!c.hasKey) throw new Error('token missing');
+  const body = {
+    model: c.chatModel,
+    messages,
+    temperature: options && options.temperature != null ? options.temperature : 0.4,
+    max_tokens: options && options.maxTokens || 700,
+    stream: false,
+  };
+  const r = await fetch(`${c.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: headers({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`chat -> ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const j = await r.json();
+  return String(j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content || '').trim();
+}
+
+function practiceContext(context) {
+  const cv = String(context && context.cv || '').slice(0, 6000);
+  const jd = String(context && context.jd || '').slice(0, 3000);
+  return `DESCRIPCIÓN DEL CARGO:\n${jd || '(no proporcionada)'}\n\nCV DEL CANDIDATO:\n${cv || '(no proporcionado)'}`;
+}
+
+function buildPracticeQuestionPrompt(history, context) {
+  const turns = Array.isArray(history) ? history.slice(-8) : [];
+  const previous = turns.length
+    ? turns.map((turn, i) => `${i + 1}. Pregunta: ${String(turn.question || '').slice(0, 500)}\nRespuesta: ${String(turn.answer || '').slice(0, 1500)}`).join('\n\n')
+    : '(ninguna; inicia con una pregunta de presentación o motivación)';
+  return [
+    'Actúa como entrevistador laboral senior. Formula UNA sola pregunta en español.',
+    'Debe ser natural, concreta y pertinente al cargo y CV. Alterna motivación, experiencia, conducta, resolución de problemas y aspectos técnicos cuando corresponda.',
+    'No repitas preguntas. Si la respuesta anterior permite profundizar, haz una repregunta útil.',
+    'Devuelve exclusivamente la pregunta, sin saludo, numeración, explicación ni respuesta sugerida.',
+    '',
+    practiceContext(context),
+    '',
+    'HISTORIAL DE LA PRÁCTICA:',
+    previous,
+  ].join('\n');
+}
+
+async function practiceQuestion(history, context) {
+  return chat([
+    { role: 'system', content: buildPracticeQuestionPrompt(history, context) },
+    { role: 'user', content: 'Formula la siguiente pregunta.' },
+  ], { temperature: 0.65, maxTokens: 180 });
+}
+
+function buildPracticeEvaluationPrompt(history, context) {
+  const turns = Array.isArray(history) ? history : [];
+  const transcript = turns.map((turn, i) => `PREGUNTA ${i + 1}: ${String(turn.question || '').slice(0, 700)}\nRESPUESTA ${i + 1}: ${String(turn.answer || '').slice(0, 2000)}`).join('\n\n');
+  return [
+    'Eres un evaluador de entrevistas laborales exigente y constructivo.',
+    'Evalúa únicamente las respuestas realmente entregadas; no inventes logros ni penalices información que nunca fue preguntada.',
+    'Contrasta pertinencia al cargo, claridad, concreción, evidencia, estructura, seguridad y autenticidad.',
+    'Entrega en español y con este formato exacto:',
+    'PUNTAJE GLOBAL: X/100',
+    'FORTALEZAS',
+    '• 2 a 4 observaciones específicas',
+    'A MEJORAR',
+    '• 2 a 4 observaciones específicas',
+    'MEJOR RESPUESTA',
+    '• Indica cuál y por qué',
+    'RESPUESTA A REHACER',
+    '• Cita la pregunta y ofrece una versión mejorada, honesta y breve',
+    'PLAN DE PRÁCTICA',
+    '• 3 acciones concretas y priorizadas',
+    '',
+    practiceContext(context),
+    '',
+    'ENTREVISTA:',
+    transcript || '(sin respuestas)',
+  ].join('\n');
+}
+
+async function evaluatePractice(history, context) {
+  return chat([
+    { role: 'system', content: buildPracticeEvaluationPrompt(history, context) },
+    { role: 'user', content: 'Genera la evaluación final.' },
+  ], { temperature: 0.25, maxTokens: 1100 });
+}
+
 module.exports = {
   cfg,
   probe,
@@ -143,4 +228,8 @@ module.exports = {
   normalizeResponseChars,
   normalizeResponseFormat,
   normalizeResponseInstructions,
+  buildPracticeQuestionPrompt,
+  buildPracticeEvaluationPrompt,
+  practiceQuestion,
+  evaluatePractice,
 };

@@ -9,6 +9,7 @@ MVP de asistente de entrevista en tiempo real (overlay). Código propio, inspira
 - Captura de **audio de sistema** (lo que dice el entrevistador) vía loopback — sin código nativo.
 - STT + LLM vía gateway OpenAI-compatible `https://ia.iamiko.cl/v1`.
 - `Ctrl+Shift+Space`: mostrar/ocultar. Botón click-through para dejar pasar el ratón.
+- Práctica con entrevistador IA: 2–10 preguntas habladas, respuestas por micrófono y evaluación final.
 
 ## Requisitos
 - Windows (loopback de audio). Node 18+.
@@ -28,6 +29,7 @@ Al arrancar, la consola imprime los modelos disponibles del gateway (`[iamiko] m
 | `CHAT_MODEL` | modelo de chat (p.ej. el que liste /models) |
 | `STT_MODEL` | modelo de transcripción whisper; vacío = STT off |
 | `STT_LANG` | idioma (def. es) |
+| `DEEPGRAM_TTS_MODEL` | voz del entrevistador (def. `aura-2-olivia-es`) |
 
 ## Entrevista Teams / Meet
 - No requiere integración: el overlay capta el **audio de sistema** (lo que suena por los altavoces), así que oye al entrevistador en Teams/Meet/Zoom igual. Ten la llamada con audio por altavoces (no modo exclusivo).

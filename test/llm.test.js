@@ -7,6 +7,8 @@ const {
   normalizeResponseChars,
   normalizeResponseFormat,
   normalizeResponseInstructions,
+  buildPracticeQuestionPrompt,
+  buildPracticeEvaluationPrompt,
 } = require('../src/llm');
 
 test('normaliza el límite al rango permitido', () => {
@@ -47,4 +49,24 @@ test('el prompt respeta bullets o texto continuo', () => {
   assert.match(paragraph, /texto continuo/);
   assert.match(paragraph, /No uses viñetas/);
   assert.match(paragraph, /Incluye un ejemplo concreto/);
+});
+
+test('la práctica evita repetir preguntas y usa el contexto', () => {
+  const prompt = buildPracticeQuestionPrompt(
+    [{ question: 'Háblame de ti', answer: 'Soy desarrollador.' }],
+    { jd: 'Backend Node.js', cv: 'Experiencia con APIs' }
+  );
+  assert.match(prompt, /No repitas preguntas/);
+  assert.match(prompt, /Backend Node\.js/);
+  assert.match(prompt, /Háblame de ti/);
+});
+
+test('la evaluación exige evidencia y un plan concreto', () => {
+  const prompt = buildPracticeEvaluationPrompt(
+    [{ question: '¿Qué resolviste?', answer: 'Automaticé un proceso.' }],
+    { jd: 'Automatización' }
+  );
+  assert.match(prompt, /PUNTAJE GLOBAL: X\/100/);
+  assert.match(prompt, /PLAN DE PRÁCTICA/);
+  assert.match(prompt, /Automaticé un proceso/);
 });

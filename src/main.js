@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, globalShortcut, desktopCapturer, session } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, desktopCapturer, session, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const llm = require('./llm');
@@ -16,7 +16,9 @@ function loadEnv() {
 loadEnv();
 
 let win = null;
+let tray = null;
 let clickThrough = false;
+let interviewBounds = null;
 
 // --- interview context (CV + job description), persisted in userData ---
 let context = {
@@ -73,6 +75,67 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
+// --- window visibility / click-through helpers ---
+function showWindow() {
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+function toggleVisible() {
+  if (!win) return;
+  if (win.isVisible() && !win.isMinimized()) win.hide(); else showWindow();
+  updateTrayMenu();
+}
+function setClickThrough(on) {
+  clickThrough = !!on;
+  if (!win) return;
+  win.setIgnoreMouseEvents(clickThrough, { forward: true });
+  win.webContents.send('click-through-changed', clickThrough);
+  updateTrayMenu();
+}
+function registerShortcut(accel, fn) {
+  try {
+    if (!globalShortcut.register(accel, fn)) console.log('[shortcut] no se pudo registrar', accel);
+  } catch (e) { console.log('[shortcut] error', accel, e.message); }
+}
+
+// Tray: always-available way to show, release the mouse or quit
+// (the window has no taskbar entry and may be click-through).
+function trayIcon() {
+  const size = 16;
+  const buf = Buffer.alloc(size * size * 4);
+  const c = (size - 1) / 2;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const d = Math.hypot(x - c, y - c);
+      const i = (y * size + x) * 4;
+      const a = d <= 6.5 ? 255 : d <= 7.5 ? Math.round(255 * (7.5 - d)) : 0;
+      buf[i] = 0xfe; buf[i + 1] = 0xa8; buf[i + 2] = 0x6e; buf[i + 3] = a; // BGRA (#6ea8fe)
+    }
+  }
+  return nativeImage.createFromBitmap(buf, { width: size, height: size });
+}
+function updateTrayMenu() {
+  if (!tray) return;
+  const visible = !!(win && win.isVisible() && !win.isMinimized());
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: visible ? 'Ocultar asistente' : 'Mostrar asistente', accelerator: 'CommandOrControl+Shift+Space', click: toggleVisible },
+    { label: 'Paso del ratón (click-through)', type: 'checkbox', checked: clickThrough,
+      accelerator: 'CommandOrControl+Shift+M', click: (item) => setClickThrough(item.checked) },
+    { type: 'separator' },
+    { label: 'Salir', accelerator: 'CommandOrControl+Shift+Q', click: () => app.quit() },
+  ]));
+}
+function createTray() {
+  try {
+    tray = new Tray(trayIcon());
+    tray.setToolTip('ParakeetAI — asistente');
+    tray.on('click', toggleVisible);
+    updateTrayMenu();
+  } catch (e) { console.log('[tray] error', e.message); }
+}
+
 // System-audio loopback: when the renderer calls getDisplayMedia, grant a screen
 // source for video (required by the API) plus 'loopback' audio (Windows system audio).
 function installLoopbackHandler() {
@@ -98,10 +161,10 @@ app.whenReady().then(() => {
     if (info && info.error) console.log('[iamiko] probe error:', info.error);
   });
 
-  globalShortcut.register('CommandOrControl+Shift+Space', () => {
-    if (!win) return;
-    if (win.isVisible()) win.hide(); else win.show();
-  });
+  registerShortcut('CommandOrControl+Shift+Space', toggleVisible);
+  registerShortcut('CommandOrControl+Shift+M', () => setClickThrough(!clickThrough));
+  registerShortcut('CommandOrControl+Shift+Q', () => app.quit());
+  createTray();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -132,6 +195,34 @@ ipcMain.handle('suggest', async (_e, transcript) => {
   }
 });
 
+ipcMain.handle('practice-question', async (_e, history) => {
+  try { return { ok: true, text: await llm.practiceQuestion(history, context) }; }
+  catch (err) { return { ok: false, error: String(err && err.message || err) }; }
+});
+
+ipcMain.handle('practice-evaluate', async (_e, history) => {
+  try { return { ok: true, text: await llm.evaluatePractice(history, context) }; }
+  catch (err) { return { ok: false, error: String(err && err.message || err) }; }
+});
+
+ipcMain.handle('tts', async (_e, text) => {
+  const key = process.env.DEEPGRAM_API_KEY || '';
+  if (!key) return { ok: false, error: 'falta DEEPGRAM_API_KEY' };
+  const model = process.env.DEEPGRAM_TTS_MODEL || 'aura-2-olivia-es';
+  try {
+    const url = `https://api.deepgram.com/v1/speak?model=${encodeURIComponent(model)}&encoding=mp3`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Token ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: String(text || '').slice(0, 1800) }),
+    });
+    if (!r.ok) throw new Error(`Deepgram TTS -> ${r.status}: ${(await r.text()).slice(0, 160)}`);
+    return { ok: true, audio: Array.from(new Uint8Array(await r.arrayBuffer())), model };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
 ipcMain.handle('get-context', () => context);
 ipcMain.handle('save-context', (_e, data) => {
   context = {
@@ -154,9 +245,25 @@ ipcMain.handle('save-context', (_e, data) => {
   };
 });
 
-ipcMain.on('set-click-through', (_e, on) => {
-  clickThrough = !!on;
-  if (win) win.setIgnoreMouseEvents(clickThrough, { forward: true });
+ipcMain.on('set-click-through', (_e, on) => setClickThrough(on));
+
+ipcMain.on('set-practice-mode', (_e, on) => {
+  if (!win) return;
+  if (on) {
+    if (!interviewBounds) interviewBounds = win.getBounds();
+    win.setSize(760, 760, true);
+    win.center();
+    return;
+  }
+  if (interviewBounds) {
+    win.setBounds(interviewBounds, true);
+    interviewBounds = null;
+  }
 });
 
+// No taskbar entry (skipTaskbar), so "minimize" hides; bring back with
+// Ctrl+Shift+Space or the tray icon.
+ipcMain.on('minimize', () => { if (win) { win.hide(); updateTrayMenu(); } });
+
 ipcMain.on('quit', () => app.quit());
+
