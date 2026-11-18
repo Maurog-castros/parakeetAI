@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, globalShortcut, desktopCapturer, session, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, desktopCapturer, session, Tray, Menu, nativeImage, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const llm = require('./llm');
@@ -251,8 +251,16 @@ ipcMain.on('set-practice-mode', (_e, on) => {
   if (!win) return;
   if (on) {
     if (!interviewBounds) interviewBounds = win.getBounds();
-    win.setSize(760, 760, true);
-    win.center();
+    // Fit inside the visible work area (taskbar excluded, DPI-scaled), or the bottom gets cut off.
+    const wa = screen.getDisplayMatching(win.getBounds()).workArea;
+    const w = Math.min(760, wa.width - 16);
+    const h = Math.min(760, wa.height - 16);
+    win.setBounds({
+      x: Math.round(wa.x + (wa.width - w) / 2),
+      y: Math.round(wa.y + (wa.height - h) / 2),
+      width: w,
+      height: h,
+    }, true);
     return;
   }
   if (interviewBounds) {
@@ -266,4 +274,13 @@ ipcMain.on('set-practice-mode', (_e, on) => {
 ipcMain.on('minimize', () => { if (win) { win.hide(); updateTrayMenu(); } });
 
 ipcMain.on('quit', () => app.quit());
+
+// Quick toggle: make the overlay visible to screenshots / screen sharing
+// (same setting as "Mostrar el asistente al compartir pantalla").
+ipcMain.handle('set-capture-visible', (_e, on) => {
+  context.shareInterfaceVisible = on === true;
+  saveContextToDisk();
+  applyShareVisibility();
+  return context.shareInterfaceVisible;
+});
 

@@ -13,5 +13,6 @@ contextBridge.exposeInMainWorld('api', {
   setPracticeMode: (on) => ipcRenderer.send('set-practice-mode', on),
   minimize: () => ipcRenderer.send('minimize'),
   quit: () => ipcRenderer.send('quit'),
+  setCaptureVisible: (on) => ipcRenderer.invoke('set-capture-visible', on),
   onClickThroughChanged: (cb) => ipcRenderer.on('click-through-changed', (_e, on) => cb(!!on)),
 });

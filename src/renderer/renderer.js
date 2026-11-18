@@ -169,6 +169,35 @@ el('clickthru').onclick = () => {
 // main process may toggle it from the global shortcut or the tray
 window.api.onClickThroughChanged(applyClickThroughUi);
 
+// --- visible / hidden in screenshots (content protection) ---
+let captureVisible = false;
+function applyCaptureUi(on) {
+  captureVisible = on;
+  const header = el('captureToggle');
+  header.classList.toggle('active', on);
+  header.setAttribute('aria-pressed', String(on));
+  header.title = on
+    ? 'Visible en capturas de pantalla. Clic para ocultarlo'
+    : 'Oculto en capturas de pantalla. Clic para mostrarlo';
+  header.setAttribute('aria-label', on ? 'Ocultar en capturas de pantalla' : 'Mostrar en capturas de pantalla');
+  const practice = el('practiceCapture');
+  practice.classList.toggle('active', on);
+  practice.setAttribute('aria-pressed', String(on));
+  practice.textContent = on ? '📷 Visible en capturas' : '📷 Oculto en capturas';
+  el('shareInterfaceVisible').checked = on;
+}
+async function toggleCapture() {
+  const on = await window.api.setCaptureVisible(!captureVisible);
+  applyCaptureUi(on);
+  const msg = on
+    ? 'Visible en capturas: ya puedes tomar un pantallazo (Win+Shift+S)'
+    : 'Oculto en capturas y al compartir pantalla';
+  if (el('practiceDialog').open) setPracticeStatus(msg);
+  else setStatus(msg);
+}
+el('captureToggle').onclick = toggleCapture;
+el('practiceCapture').onclick = toggleCapture;
+
 // --- interview context panel ---
 function ctxInfoText() {
   el('ctxInfo').className = '';
@@ -204,6 +233,7 @@ el('ctxSave').onclick = async () => {
     responseInstructions: el('responseInstructions').value,
     shareInterfaceVisible: el('shareInterfaceVisible').checked,
   });
+  if (r && r.ok) applyCaptureUi(r.shareInterfaceVisible === true);
   if (!r || !r.ok) {
     el('ctxInfo').className = 'err';
     el('ctxInfo').textContent = 'No se pudo guardar.';
@@ -304,6 +334,8 @@ async function startPracticeMic() {
     practiceSource.connect(practiceNode);
     practiceNode.connect(silent).connect(practiceCtx.destination);
     practiceRecording = true;
+    stopPracticeAudio();
+    updateFinishButton();
     el('practiceRecord').textContent = '■ Terminar respuesta';
     el('practiceRecord').classList.add('recording');
     el('practiceSend').hidden = true;
@@ -326,61 +358,109 @@ async function stopPracticeMic() {
   el('practiceRecord').classList.remove('recording');
   const answer = practiceCommitted.trim();
   el('practiceSend').hidden = !answer;
-  setPracticeStatus(answer ? 'Respuesta lista para enviar.' : 'No se detectó una respuesta.', !answer);
+  setPracticeStatus(answer ? 'Respuesta lista: pulsa «Continuar» o «Terminar y evaluar».' : 'No se detectó una respuesta.', !answer);
+  if (el('practiceFinish')) updateFinishButton();
 }
 
+const READY_HINT = 'Pulsa «Comenzar a responder» cuando estés listo. Usa 🔊 Escuchar si quieres oír la pregunta.';
+let practiceQuestionToken = 0;
+
+function stopPracticeAudio() {
+  if (practiceAudio) { practiceAudio.pause(); practiceAudio = null; }
+  el('practiceReplay').textContent = '🔊 Escuchar';
+}
+
+// Voice is opt-in (button only): Deepgram TTS is slow and sometimes unavailable.
 async function speakPracticeQuestion() {
   if (!practiceQuestion) return;
-  if (practiceAudio) { practiceAudio.pause(); practiceAudio = null; }
+  if (practiceAudio) { stopPracticeAudio(); setPracticeStatus(READY_HINT); return; }
+  const btn = el('practiceReplay');
+  btn.disabled = true;
+  btn.textContent = '⏳ Cargando voz…';
   setPracticeStatus('Preparando voz del entrevistador…');
-  const response = await window.api.speak(practiceQuestion);
-  if (!response.ok) { setPracticeStatus('Voz: ' + response.error, true); return; }
+  const question = practiceQuestion;
+  let response;
+  try { response = await window.api.speak(question); }
+  catch (err) { response = { ok: false, error: String(err && err.message || err) }; }
+  btn.disabled = false;
+  btn.textContent = '🔊 Escuchar';
+  if (question !== practiceQuestion) return; // moved on meanwhile
+  if (!response.ok) {
+    const unavailable = /\b(5\d\d|429)\b/.test(response.error || '');
+    setPracticeStatus(unavailable
+      ? 'La voz no está disponible en este momento. Puedes leer la pregunta y responder igual.'
+      : 'No se pudo generar la voz: ' + response.error, true);
+    return;
+  }
   const url = URL.createObjectURL(new Blob([new Uint8Array(response.audio)], { type: 'audio/mpeg' }));
   practiceAudio = new Audio(url);
-  practiceAudio.onended = () => { URL.revokeObjectURL(url); setPracticeStatus('Pulsa “Responder” cuando estés listo.'); };
-  practiceAudio.onerror = () => { URL.revokeObjectURL(url); setPracticeStatus('No se pudo reproducir la voz.', true); };
-  await practiceAudio.play();
+  btn.textContent = '■ Detener voz';
+  const done = (msg, isErr) => { URL.revokeObjectURL(url); practiceAudio = null; btn.textContent = '🔊 Escuchar'; setPracticeStatus(msg, isErr); };
+  practiceAudio.onended = () => done(READY_HINT);
+  practiceAudio.onerror = () => done('No se pudo reproducir la voz.', true);
+  setPracticeStatus('Reproduciendo pregunta…');
+  try { await practiceAudio.play(); } catch (_) { done('No se pudo reproducir la voz.', true); }
+}
+
+function updateFinishButton() {
+  const answered = practiceHistory.length + (practiceCommitted.trim() ? 1 : 0);
+  el('practiceFinish').disabled = answered === 0 && !practiceRecording;
 }
 
 async function loadPracticeQuestion() {
+  const token = ++practiceQuestionToken;
+  stopPracticeAudio();
   setPracticeStatus('Preparando pregunta…');
   el('practiceRecord').disabled = true;
+  el('practiceReplay').disabled = true;
   el('practiceRecord').textContent = '🎙 Comenzar a responder';
   el('practiceRecord').classList.remove('recording');
   el('practiceSend').hidden = true;
+  el('practiceQuestion').textContent = 'Generando pregunta…';
   el('practiceOptimal').textContent = 'Preparando una respuesta óptima para esta pregunta…';
+  el('practiceProgress').value = practiceHistory.length;
+  el('practiceProgress').max = practiceTotal;
+  el('practiceCounter').textContent = `Pregunta ${practiceHistory.length + 1} de ${practiceTotal}`;
+  updateFinishButton();
   const response = await window.api.practiceQuestion(practiceHistory);
+  if (token !== practiceQuestionToken) return;
+  el('practiceRecord').disabled = false;
   if (!response.ok) {
+    el('practiceQuestion').textContent = 'No se pudo generar la pregunta.';
     setPracticeStatus('Pregunta: ' + response.error, true);
-    el('practiceRecord').disabled = false;
     return;
   }
   practiceQuestion = response.text.trim();
   el('practiceQuestion').textContent = practiceQuestion;
-  el('practiceAnswer').textContent = 'Pulsa “Responder” y habla.';
-  el('practiceProgress').value = practiceHistory.length;
-  el('practiceProgress').max = practiceTotal;
-  el('practiceCounter').textContent = `Pregunta ${practiceHistory.length + 1} de ${practiceTotal}`;
-  el('practiceRecord').disabled = false;
-  const optimalPromise = window.api.suggest(practiceQuestion).then((optimal) => {
+  el('practiceReplay').disabled = false;
+  el('practiceAnswer').textContent = 'Pulsa «Comenzar a responder» y habla con naturalidad.';
+  setPracticeStatus(READY_HINT);
+  // Suggested answer loads in the background; ignore it if the user already moved on.
+  window.api.suggest(practiceQuestion).then((optimal) => {
+    if (token !== practiceQuestionToken) return;
     el('practiceOptimal').textContent = optimal.ok && optimal.text
       ? optimal.text
       : 'No se pudo generar la respuesta sugerida: ' + (optimal.error || 'respuesta vacía');
   });
-  await Promise.allSettled([speakPracticeQuestion(), optimalPromise]);
 }
 
 async function finishPractice() {
+  practiceQuestionToken++;
+  stopPracticeAudio();
   showPracticeView('practiceResultView');
-  el('practiceResult').textContent = 'Evaluando tus respuestas…';
-  setPracticeStatus('Generando evaluación final…');
+  const partial = practiceHistory.length < practiceTotal;
+  const scope = partial
+    ? `Evaluación anticipada: ${practiceHistory.length} de ${practiceTotal} preguntas respondidas.\n\n`
+    : '';
+  el('practiceResult').textContent = scope + 'Evaluando tus respuestas…';
+  setPracticeStatus('Generando evaluación…');
   const response = await window.api.evaluatePractice(practiceHistory);
   if (!response.ok) {
-    el('practiceResult').textContent = 'No se pudo generar la evaluación.';
+    el('practiceResult').textContent = scope + 'No se pudo generar la evaluación.';
     setPracticeStatus('Evaluación: ' + response.error, true);
     return;
   }
-  el('practiceResult').textContent = response.text;
+  el('practiceResult').textContent = scope + response.text;
   setPracticeStatus('Evaluación completada.');
 }
 
@@ -390,14 +470,20 @@ el('practiceOpen').onclick = async () => {
   practiceQuestion = '';
   showPracticeView('practiceSetup');
   setPracticeStatus('');
+  el('ctxPanel').hidden = true;
+  // Practice replaces the assistant view (no overlap); restored on close.
+  document.getElementById('app').classList.add('practice-mode');
   window.api.setPracticeMode(true);
   el('practiceDialog').showModal();
 };
 el('practiceClose').onclick = () => el('practiceDialog').close();
 el('practiceDialog').addEventListener('close', async () => {
+  practiceQuestionToken++;
   await stopPracticeMic();
-  if (practiceAudio) { practiceAudio.pause(); practiceAudio = null; }
+  stopPracticeAudio();
+  document.getElementById('app').classList.remove('practice-mode');
   window.api.setPracticeMode(false);
+  setStatus('Listo — pulsa «Iniciar escucha»');
 });
 el('practiceStart').onclick = async () => {
   const count = el('practiceCount');
@@ -417,6 +503,18 @@ el('practiceSend').onclick = async () => {
   if (practiceHistory.length >= practiceTotal) await finishPractice();
   else await loadPracticeQuestion();
 };
+// Finish early: evaluate what has been answered so far (including an unsent answer).
+el('practiceFinish').onclick = async () => {
+  if (practiceRecording) await stopPracticeMic();
+  const pending = practiceCommitted.trim();
+  if (pending && practiceQuestion) practiceHistory.push({ question: practiceQuestion, answer: pending });
+  practiceCommitted = practiceInterim = '';
+  if (!practiceHistory.length) {
+    setPracticeStatus('Responde al menos una pregunta para poder evaluar.', true);
+    return;
+  }
+  await finishPractice();
+};
 el('practiceAgain').onclick = () => {
   practiceHistory = [];
   practiceQuestion = '';
@@ -433,6 +531,7 @@ el('practiceAgain').onclick = () => {
   if (!c.hasKey) missing.push('IAMIKO_TOKEN');
   if (!dgKey) missing.push('DEEPGRAM_API_KEY');
   const ctx = await window.api.getContext();
+  applyCaptureUi(ctx.shareInterfaceVisible === true);
   if (missing.length) setStatus('Falta configurar ' + missing.join(' y ') + ' en el archivo .env', true);
   else if (!(ctx.cv || ctx.jd)) setStatus('Añade tu CV y el cargo en ⚙ Configuración, luego pulsa «Iniciar escucha»');
   else setStatus('Listo — pulsa «Iniciar escucha»');

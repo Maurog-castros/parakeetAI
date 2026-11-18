@@ -22,7 +22,7 @@
   header .grip { color:var(--dim); font-size:11px; font-weight:400; }
   header .spacer { flex:1; }
   /* Electron drag regions swallow clicks even under overlays: opt every overlay out. */
-  header button, #ctxPanel, #ctxPanel *, dialog, dialog * { -webkit-app-region: no-drag; }
+  header button, #ctxPanel, #ctxPanel *, dialog button, dialog input, dialog summary { -webkit-app-region: no-drag; }
   .dot { width:8px; height:8px; border-radius:50%; background:var(--dim); flex:none; transition:background .2s; }
   .dot.live { background:var(--ok); box-shadow:0 0 0 3px rgba(95,211,154,.18); animation:pulse 1.6s ease-in-out infinite; }
   .dot.err { background:var(--err); }
@@ -107,46 +107,68 @@
   #ctxInfo.ok { color:var(--ok); }
   #ctxInfo.err { color:var(--err); }
 
-  /* --- practice dialog --- */
-  dialog { color:var(--fg); border:1px solid var(--line-strong); border-radius:14px; padding:0;
-    background:rgba(13,15,20,.99); width:min(720px, calc(100% - 24px)); height:min(720px, calc(100% - 24px)); }
+  /* --- practice: replaces the main view and fills the whole window --- */
+  #app.practice-mode > :not(dialog) { display:none !important; }
+  dialog { position:fixed; inset:0; margin:0; padding:0; width:100%; height:100%; max-width:none; max-height:none;
+    color:var(--fg); border:1px solid var(--line-strong); border-radius:14px; background:rgba(13,15,20,.99); overflow:hidden; }
   dialog:modal { overscroll-behavior:contain; }
-  dialog::backdrop { background:rgba(0,0,0,.68); }
-  .practice-card { height:100%; display:flex; flex-direction:column; gap:14px; padding:18px; }
-  .practice-head, .practice-actions { display:flex; align-items:center; gap:8px; }
-  .practice-head { padding-bottom:10px; border-bottom:1px solid var(--line); }
-  .practice-head h2 { margin:0; font-size:18px; }
-  .practice-head .spacer, .practice-actions .spacer { flex:1; }
-  .practice-view { flex:1; min-height:0; display:flex; flex-direction:column; gap:12px; overflow:auto; }
-  .practice-setup { justify-content:center; max-width:520px; margin-inline:auto; width:100%; }
-  .practice-intro { margin:0; color:#c6ccda; line-height:1.55; }
-  .practice-benefits { margin:0; padding-inline-start:20px; color:var(--mut); line-height:1.65; }
+  dialog::backdrop { background:transparent; }
+  .practice-card { height:100%; display:flex; flex-direction:column; min-height:0; }
+  .practice-head { -webkit-app-region: drag; display:flex; align-items:center; gap:8px; padding:8px 8px 8px 18px;
+    border-bottom:1px solid var(--line); background:rgba(0,0,0,.28); user-select:none; flex:none; }
+  dialog .practice-head { -webkit-app-region: drag; }
+  dialog .practice-head button { -webkit-app-region: no-drag; }
+  .practice-head h2 { margin:0; font-size:15px; }
+  .practice-head .spacer { flex:1; }
+  .practice-view { flex:1; min-height:0; display:flex; flex-direction:column; }
+  .practice-view[hidden] { display:none; }
+  .practice-body { flex:1; min-height:0; overflow:auto; display:flex; flex-direction:column; gap:12px; padding:16px 18px; }
+  .practice-foot { flex:none; display:flex; align-items:center; gap:8px; padding:12px 18px;
+    border-top:1px solid var(--line); background:rgba(0,0,0,.22); }
+  .practice-foot button { flex:1; min-height:42px; font-size:14px; }
+  #practiceStatus { flex:none; min-height:26px; padding:5px 18px; font-size:12px; color:var(--mut); border-top:1px solid var(--line); }
+  #practiceStatus:empty { display:none; }
+  #practiceStatus.err { color:var(--err); }
+
+  .practice-setup .practice-body { justify-content:center; max-width:540px; width:100%; margin-inline:auto; }
+  .practice-intro { margin:0; color:#c6ccda; line-height:1.55; font-size:14px; }
+  .practice-benefits { margin:0; padding-inline-start:20px; color:var(--mut); line-height:1.7; font-size:13px; }
   .practice-field { display:flex; flex-direction:column; gap:5px; }
   .practice-field label { font-size:12px; color:var(--mut); }
   .practice-field input { width:110px; background:var(--card); color:var(--fg); border:1px solid var(--line-strong);
     border-radius:7px; padding:8px; font:inherit; }
-  #practiceStart { min-height:42px; font-size:14px; }
+  .practice-setup .practice-foot { justify-content:center; }
+  .practice-setup .practice-foot button { max-width:540px; }
+
   .practice-progress-row { display:flex; align-items:center; gap:12px; }
-  #practiceProgress { flex:1; accent-color:var(--acc); }
-  .practice-question { padding:16px; background:linear-gradient(135deg, rgba(110,168,254,.18), var(--card));
-    border:1px solid rgba(110,168,254,.28); border-radius:11px; font-size:17px; line-height:1.5; }
+  #practiceProgress { flex:1; height:6px; accent-color:var(--acc); }
+  .practice-question { display:flex; gap:10px; align-items:flex-start; padding:14px 16px;
+    background:linear-gradient(135deg, rgba(110,168,254,.18), var(--card));
+    border:1px solid rgba(110,168,254,.28); border-radius:11px; font-size:16px; line-height:1.5; }
+  .practice-question > div { flex:1; }
   .practice-eyebrow { display:block; margin-bottom:6px; color:var(--acc); font-size:10px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; }
-  .practice-toolbar { display:flex; gap:8px; }
-  .practice-coach { border:1px solid rgba(102,214,153,.22); background:rgba(40,92,65,.16); border-radius:10px; }
-  .practice-coach summary { padding:11px 13px; cursor:pointer; color:#9de0ba; font-weight:600; }
-  .practice-coach-content { padding:0 13px 13px; color:#d8eee1; line-height:1.5; white-space:pre-wrap; }
-  .practice-answer-wrap { flex:1; min-height:0; display:flex; flex-direction:column; gap:6px; }
+  #practiceReplay { flex:none; }
+  .practice-coach { flex:none; border:1px solid rgba(102,214,153,.22); background:rgba(40,92,65,.16); border-radius:10px; }
+  .practice-coach summary { padding:10px 13px; cursor:pointer; color:#9de0ba; font-weight:600; font-size:13px; }
+  .practice-coach-content { padding:0 13px 13px; color:#d8eee1; line-height:1.5; white-space:pre-wrap; font-size:13px;
+    max-height:180px; overflow:auto; }
+  .practice-answer-wrap { flex:1; min-height:110px; display:flex; flex-direction:column; gap:6px; }
   .practice-answer-label { color:var(--mut); font-size:11px; font-weight:700; letter-spacing:.07em; text-transform:uppercase; }
-  .practice-answer { flex:1; min-height:105px; padding:12px; background:rgba(32,36,46,.65); border:1px solid var(--line);
-    border-radius:9px; line-height:1.5; white-space:pre-wrap; overflow:auto; }
-  .practice-actions button { min-height:42px; padding-inline:16px; }
-  #practiceRecord { flex:1; }
+  .practice-answer { flex:1; min-height:80px; padding:12px; background:rgba(32,36,46,.65); border:1px solid var(--line);
+    border-radius:9px; line-height:1.5; white-space:pre-wrap; overflow:auto; font-size:13.5px; }
   #practiceRecord.recording { background:#b94646; border-color:#db6868; color:white; }
-  #practiceSend { flex:1; }
-  .practice-result { white-space:pre-wrap; line-height:1.55; font-size:13px; }
-  .practice-meta { font-size:11px; color:var(--mut); }
-  #practiceStatus { min-height:18px; font-size:12px; color:var(--mut); }
-  #practiceStatus.err { color:var(--err); }
+  .practice-foot button.finish { flex:0 0 auto; padding-inline:18px; font-size:13px; }
+  .practice-result { white-space:pre-wrap; line-height:1.55; font-size:13.5px; }
+  .practice-meta { font-size:11px; color:var(--mut); white-space:nowrap; }
+  .capture-toggle.active { color:var(--ok); background:rgba(95,211,154,.14); border-color:rgba(95,211,154,.45); }
+  button.icon.capture-toggle.active { border-color:transparent; }
+  @media (max-height:640px) {
+    .practice-body { padding:10px 14px; gap:8px; }
+    .practice-question { padding:10px 12px; font-size:14.5px; }
+    .practice-coach-content { max-height:110px; }
+    .practice-foot { padding:8px 14px; }
+    .practice-foot button { min-height:36px; }
+  }
   @media (pointer:coarse) { dialog button, dialog input { min-height:48px; } }
   @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 </style>
@@ -158,6 +180,7 @@
       <span class="spacer"></span>
       <button id="practiceOpen" class="icon" title="Práctica de entrevista" aria-label="Práctica de entrevista">🎤</button>
       <button id="settings" class="icon" title="Configuración (CV, cargo, formato)" aria-label="Configuración">⚙</button>
+      <button id="captureToggle" class="icon capture-toggle" title="Oculto en capturas de pantalla. Clic para mostrarlo" aria-label="Mostrar en capturas de pantalla" aria-pressed="false">📷</button>
       <button id="clickthru" class="icon" title="Paso del ratón: los clics atraviesan la ventana (Ctrl+Shift+M)" aria-label="Paso del ratón" aria-pressed="false">🖱</button>
       <span class="sep" aria-hidden="true"></span>
       <button id="minimize" class="icon" title="Ocultar (Ctrl+Shift+Space para volver)" aria-label="Ocultar">—</button>
@@ -238,56 +261,69 @@
     <dialog id="practiceDialog" aria-labelledby="practiceTitle">
       <div class="practice-card">
         <div class="practice-head">
-          <h2 id="practiceTitle">Práctica de entrevista con IA</h2>
+          <h2 id="practiceTitle">🎤 Práctica de entrevista con IA</h2>
           <span class="spacer"></span>
-          <button id="practiceClose" class="icon close" type="button" title="Cerrar práctica (Esc)" aria-label="Cerrar práctica">✕</button>
+          <button id="practiceCapture" class="capture-toggle small" type="button" aria-pressed="false">📷 Oculto en capturas</button>
+          <button id="practiceClose" class="icon close" type="button" title="Cerrar práctica y volver al asistente (Esc)" aria-label="Cerrar práctica">✕</button>
         </div>
 
         <section id="practiceSetup" class="practice-view practice-setup">
-          <p class="practice-intro">Simula una entrevista real adaptada a tu CV y al cargo. En cada pregunta tendrás una respuesta óptima como referencia.</p>
-          <ul class="practice-benefits">
-            <li>Escucha la pregunta con voz natural.</li>
-            <li>Compara tu respuesta con una propuesta profesional.</li>
-            <li>Recibe puntaje y recomendaciones al finalizar.</li>
-          </ul>
-          <div class="practice-field">
-            <label for="practiceCount">Cantidad de preguntas</label>
-            <input id="practiceCount" name="practiceCount" type="number" min="2" max="10" value="5"
-              aria-describedby="practiceCountHint" required />
-            <span id="practiceCountHint" class="practice-meta">Entre 2 y 10 preguntas.</span>
+          <div class="practice-body">
+            <p class="practice-intro">Simula una entrevista real adaptada a tu CV y al cargo. En cada pregunta tendrás una respuesta óptima como referencia.</p>
+            <ul class="practice-benefits">
+              <li>Escucha la pregunta con voz natural.</li>
+              <li>Compara tu respuesta con una propuesta profesional.</li>
+              <li>Recibe puntaje y recomendaciones al finalizar.</li>
+            </ul>
+            <div class="practice-field">
+              <label for="practiceCount">Cantidad de preguntas</label>
+              <input id="practiceCount" name="practiceCount" type="number" min="2" max="10" value="5"
+                aria-describedby="practiceCountHint" required />
+              <span id="practiceCountHint" class="practice-meta">Entre 2 y 10 preguntas.</span>
+            </div>
           </div>
-          <button id="practiceStart" class="primary" type="button">Iniciar práctica</button>
+          <div class="practice-foot">
+            <button id="practiceStart" class="primary" type="button">Iniciar práctica</button>
+          </div>
         </section>
 
         <section id="practiceSession" class="practice-view" hidden>
-          <div class="practice-progress-row">
-            <progress id="practiceProgress" value="0" max="5" aria-labelledby="practiceCounter"></progress>
-            <strong id="practiceCounter" class="practice-meta"></strong>
+          <div class="practice-body">
+            <div class="practice-progress-row">
+              <progress id="practiceProgress" value="0" max="5" aria-labelledby="practiceCounter"></progress>
+              <strong id="practiceCounter" class="practice-meta"></strong>
+            </div>
+            <div class="practice-question">
+              <div>
+                <span class="practice-eyebrow">Pregunta del entrevistador</span>
+                <div id="practiceQuestion"></div>
+              </div>
+              <button id="practiceReplay" class="small" type="button" title="Escuchar la pregunta en voz alta (opcional)">🔊 Escuchar</button>
+            </div>
+            <details id="practiceCoach" class="practice-coach" open>
+              <summary>Respuesta óptima sugerida</summary>
+              <div id="practiceOptimal" class="practice-coach-content">Preparando propuesta…</div>
+            </details>
+            <div class="practice-answer-wrap">
+              <span class="practice-answer-label">Tu respuesta</span>
+              <div id="practiceAnswer" class="practice-answer">Pulsa “Comenzar a responder” y habla con naturalidad.</div>
+            </div>
           </div>
-          <div class="practice-question">
-            <span class="practice-eyebrow">Pregunta del entrevistador</span>
-            <div id="practiceQuestion"></div>
-          </div>
-          <div class="practice-toolbar">
-            <button id="practiceReplay" type="button">🔊 Repetir pregunta</button>
-          </div>
-          <details id="practiceCoach" class="practice-coach" open>
-            <summary>Respuesta óptima sugerida</summary>
-            <div id="practiceOptimal" class="practice-coach-content">Preparando propuesta…</div>
-          </details>
-          <div class="practice-answer-wrap">
-            <span class="practice-answer-label">Tu respuesta</span>
-            <div id="practiceAnswer" class="practice-answer">Pulsa “Comenzar a responder” y habla con naturalidad.</div>
-          </div>
-          <div class="practice-actions">
+          <div class="practice-foot practice-actions">
             <button id="practiceRecord" class="primary" type="button">🎙 Comenzar a responder</button>
             <button id="practiceSend" class="primary" type="button" hidden>Continuar →</button>
+            <button id="practiceFinish" class="finish" type="button" disabled
+              title="Termina ahora y evalúa solo las preguntas respondidas">✓ Terminar y evaluar</button>
           </div>
         </section>
 
         <section id="practiceResultView" class="practice-view" hidden>
-          <div id="practiceResult" class="practice-result"></div>
-          <button id="practiceAgain" class="primary" type="button">Nueva práctica</button>
+          <div class="practice-body">
+            <div id="practiceResult" class="practice-result"></div>
+          </div>
+          <div class="practice-foot">
+            <button id="practiceAgain" class="primary" type="button">Nueva práctica</button>
+          </div>
         </section>
         <div id="practiceStatus" role="status" aria-live="polite"></div>
       </div>
