@@ -15,6 +15,16 @@ function loadEnv() {
 }
 loadEnv();
 
+// Single instance: a second launch (e.g. the .cmd run twice, or while the
+// window is hidden) would fail to register shortcuts and lock the cache.
+// Instead, quit it and bring the existing window back.
+if (!app.requestSingleInstanceLock()) {
+  console.log('ParakeetAI ya está abierto: se muestra la ventana existente.');
+  app.quit();
+  process.exit(0);
+}
+app.on('second-instance', () => showWindow());
+
 let win = null;
 let tray = null;
 let clickThrough = false;
