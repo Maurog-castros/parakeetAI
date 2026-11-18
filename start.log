@@ -1,0 +1,76 @@
+
+> parakeet-mvp@0.1.0 start
+> electron .
+
+
+[iamiko] base: https://ia.iamiko.cl/vscode/v1 | key: set
+[iamiko] models: qwen35-122b
+[renderer] [dg] module loaded
+[renderer] %cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security
+  Policy set or a policy with "unsafe-eval" enabled. This exposes users of
+  this app to unnecessary security risks.
+
+For more information and help, consult
+https://electronjs.org/docs/tutorial/security.
+This warning will not show up
+once the app is packaged.
+[renderer] [app] ready | deepgram true nova-2 | chat auto-vscode | lang es | cv 5606 jd 1188
+[renderer] [cap] track System audio {"autoGainControl":false,"channelCount":2,"deviceId":"loopback","echoCancellation":false,"latency":0.01,"noiseSuppression":false,"sampleRate":48000,"sampleSize":16,"voiceIsolation":false}
+[renderer] [dg] open
+[renderer] [dg] final "Me han dicho mucho, buena, que"
+[renderer] [dg] final "que han salido recién de egresados y bueno, hasta o bueno que quieren hacer práctica y no no han podido hacer, pues bueno."
+[renderer] [dg] final "O sea, es decir que las las empresas no no quieren"
+[renderer] [dg] final "¿Alguna pregunta? Como si fuese 2º entrevista."
+[renderer] [dg] final "A ver, yo entrevista preguntaría."
+[renderer] [dg] final "¿Qué hace este momento?"
+[renderer] [dg] final "Ahí ya ya ya ya ya cagaste."
+[renderer] [dg] final "O sea, no, ni siquiera has contratado, Julio."
+[renderer] [dg] close 1000 
+[renderer] [cap] track System audio {"autoGainControl":false,"channelCount":2,"deviceId":"loopback","echoCancellation":false,"latency":0.01,"noiseSuppression":false,"sampleRate":48000,"sampleSize":16,"voiceIsolation":false}
+[renderer] [dg] open
+[renderer] [dg] final "No, sí, ya no hay nada más y ya te ya te fuiste despedíbulo."
+[renderer] [dg] close 1000 
+[renderer] [cap] track System audio {"autoGainControl":false,"channelCount":2,"deviceId":"loopback","echoCancellation":false,"latency":0.01,"noiseSuppression":false,"sampleRate":48000,"sampleSize":16,"voiceIsolation":false}
+[renderer] [dg] open
+[renderer] [dg] final "Igual, me poní serio y después me quería cagar, y después ya no pongo serio más, bueno, así que cagar."
+[renderer] [dg] final "Ese costumblamente que no"
+[renderer] [dg] final "cuidaba."
+[renderer] [dg] final "El contexto."
+[renderer] [dg] final "¿No entiende muy bien o entiende muy bien?"
+[renderer] [dg] final "12, porque es que una cosa que entienden muy bien y otra cosa"
+[renderer] [dg] close 1000 
+[renderer] [cap] track System audio {"autoGainControl":false,"channelCount":2,"deviceId":"loopback","echoCancellation":false,"latency":0.01,"noiseSuppression":false,"sampleRate":48000,"sampleSize":16,"voiceIsolation":false}
+[renderer] [dg] open
+[renderer] [dg] final "Mencionar."
+[renderer] [dg] final "Cuando cuando tenía la cámara ocular en la mano, bueno, hasta que debías ahí,"
+[renderer] [dg] final "y ahí voy a preguntar."
+[renderer] [dg] final "Eso sería mucho mucho rato."
+[renderer] [dg] final "Es que tienes de todo, porque yo yo en en mi punto de vista,"
+[renderer] [dg] final "es que a veces puede haber"
+[renderer] [dg] final "más integrantes o puede haber más más voces, entonces"
+[renderer] [dg] final "Bueno, igual, sí, pues, o sea, para que no no"
+[renderer] [dg] final "no lea de otra fuente."
+[renderer] [dg] final "Pero no, pues, es que el, a ver, no, pues, tanta mal, pues,"
+[renderer] [dg] final "a ver, en este momento la fuente lo está tomando desde tu computador."
+[renderer] [dg] final "Como que la salida."
+[renderer] [dg] final "O sea, no captó lo que tú hablas."
+[renderer] [dg] final "Entonces,"
+[renderer] [dg] final "Pero ahí no tenéis una conversación limpia,"
+[renderer] [dg] final "¿Respondé lo que te preguntan?"
+[renderer] [dg] final "Pero que que tendría que, a ver, es que"
+[renderer] [dg] final "hay algunas preguntas que necesitas analizar lo que tú respondiste."
+[renderer] [dg] close 1000 
+[renderer] [cap] track System audio {"autoGainControl":false,"channelCount":2,"deviceId":"loopback","echoCancellation":false,"latency":0.01,"noiseSuppression":false,"sampleRate":48000,"sampleSize":16,"voiceIsolation":false}
+[renderer] [dg] open
+[renderer] [dg] close 1000 
+[renderer] [cap] track System audio {"autoGainControl":false,"channelCount":2,"deviceId":"loopback","echoCancellation":false,"latency":0.01,"noiseSuppression":false,"sampleRate":48000,"sampleSize":16,"voiceIsolation":false}
+[renderer] [dg] open
+[renderer] [dg] final "Ya, bueno, ¿cuánto es tu pretensión de renta?"
+[renderer] [dg] final "Weón tal cual se te ve, se te nota que estás leyendo,"
+[renderer] [dg] final "Sí, pues, como lo dices."
+[renderer] [dg] final "Bueno, es es para mí ya es 100 por 100 notorio que estáis leyendo."
+[renderer] [dg] close 1000 
+[renderer] [cap] track System audio {"autoGainControl":false,"channelCount":2,"deviceId":"loopback","echoCancellation":false,"latency":0.01,"noiseSuppression":false,"sampleRate":48000,"sampleSize":16,"voiceIsolation":false}
+[renderer] [dg] open
+[renderer] [dg] final "¿Cuál es tu pretensión de renta?"
+[renderer] [dg] close 1000 
