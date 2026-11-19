@@ -51,7 +51,7 @@ function normalizeMeeting(m) {
     decisions: list(m.decisions),
     nextSteps: list(m.nextSteps),
     initiatives: list(m.initiatives),
-    logFile: str(m.logFile, 400),
+    folder: str(m.folder, 400), // session folder under transcripciones/
   };
 }
 
@@ -153,7 +153,7 @@ function applySummary(memory, summary, info) {
   const mem = normalizeMemory(memory);
   const s = normalizeSummary(summary);
   const meetingId = str(info && info.meetingId, 60) || meetingIdFor(info && info.startedAt);
-  const now = iso(info && info.endedAt) || new Date().toISOString();
+  const now = iso(info && info.endedAt) || iso(info && info.startedAt) || new Date().toISOString();
 
   mem.meetings = mem.meetings.filter((m) => m.id !== meetingId);
   mem.items = mem.items.filter((it) => !(it.meetingId === meetingId && !it.done));
@@ -185,7 +185,7 @@ function applySummary(memory, summary, info) {
     decisions: s.decisions,
     nextSteps: s.nextSteps,
     initiatives: s.initiatives,
-    logFile: info && info.logFile,
+    folder: info && info.folder,
   });
   mem.meetings.push(meeting);
   mem.meetings.sort((a, b) => String(a.startedAt || '').localeCompare(String(b.startedAt || '')));

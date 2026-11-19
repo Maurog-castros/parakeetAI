@@ -670,6 +670,18 @@ function addList(target, title, arr, fmt) {
   for (const x of arr) ul.appendChild(mk('li', null, fmt ? fmt(x) : x));
   target.appendChild(ul);
 }
+// Session folder (transcripción, resumen, pendientes, ideas…) in the explorer.
+async function openFolder(folder) {
+  const r = await window.api.openFolder(folder || '');
+  if (!r || !r.ok) setStatus('No se pudo abrir la carpeta: ' + (r && r.error || 'error'), true);
+}
+function folderButton(folder) {
+  const b = mk('button', 'small mem-folder', '📂 Abrir carpeta');
+  b.type = 'button';
+  b.title = folder;
+  b.onclick = () => openFolder(folder);
+  return b;
+}
 const itemLabel = (it) => it.text + (it.owner ? ' — ' + it.owner : '');
 // Meeting summary (fresh result or a stored meeting) into target.
 function renderMeetingBody(target, m, newItems, resolvedItems) {
@@ -752,7 +764,15 @@ function renderMemory() {
       renderMemory();
       configureGateway(false);
     };
-    d.append(sum, body, del);
+    d.append(sum, body);
+    if (m.folder) {
+      const h = mk('button', 'small mem-folder', '📚 Ver en historial');
+      h.type = 'button';
+      h.onclick = () => openHistory(m.folder.split(/[\\/]/).pop());
+      d.appendChild(h);
+      d.appendChild(folderButton(m.folder));
+    }
+    d.appendChild(del);
     wrap.appendChild(d);
   }
   el('memInfo').textContent = open.length + ' pendiente' + (open.length === 1 ? '' : 's') + ' · ' + meetings.length + ' conversaci' + (meetings.length === 1 ? 'ón' : 'ones');
@@ -760,6 +780,7 @@ function renderMemory() {
 async function openMemPanel() {
   if (isCompact()) setLayout('expanded');
   el('ctxPanel').hidden = true;
+  el('histPanel').hidden = true;
   memory = await window.api.getMemory();
   renderMemory();
   el('memPanel').hidden = false;
@@ -771,7 +792,7 @@ let summarizing = false;
 async function summarizeConversation() {
   if (summarizing) return;
   const snap = sessionSnapshot();
-  if (!snap || !snap.transcript.length) { setStatus('No hay conversación para resumir todavía', true); return; }
+  if (!snap || !snap.transcript.length) { setStatus('No hay conversación para resumir todavía', true); return false; }
   summarizing = true;
   el('summarizeBtn').disabled = el('memSummarize').disabled = true;
   if (el('memPanel').hidden) await openMemPanel();
@@ -784,16 +805,60 @@ async function summarizeConversation() {
   if (!r || !r.ok) {
     showMemResult('No se pudo resumir: ' + (r && r.error || 'error'), true);
     setStatus('Resumen: ' + (r && r.error || 'error'), true);
-    return;
+    return false;
   }
   memory = r.memory;
   renderMemory();
   showMemResult((box) => {
     box.appendChild(mk('div', 'mem-title', '📝 ' + r.meeting.title));
     renderMeetingBody(box, r.meeting, r.newItems, r.resolvedItems);
+    if (r.meeting.folder) box.appendChild(folderButton(r.meeting.folder));
   });
   configureGateway(false); // live notes now know the updated pending items
   setStatus('Resumen guardado en la memoria');
+  return true;
+}
+
+// A phrase still being recognised (interim) would be lost on stop: keep it.
+function flushInterim(who) {
+  const node = interimEl[who];
+  const text = node && node.querySelector('.txt').textContent.trim();
+  if (text) addFinal(who, text);
+  else dropInterim(who);
+}
+
+// "Terminar reunión": the last ideas usually come at the very end, so first
+// flush what is still in the pipeline (Finalize + pending interim), then stop
+// listening, summarise into the memory and start a fresh session. If the
+// summary fails the transcript stays on screen to retry with 📝 Resumir.
+let endingMeeting = false;
+async function endMeeting() {
+  if (endingMeeting || summarizing) return;
+  if (!running && !bubbles.some((b) => b.text)) { setStatus('No hay reunión en curso', true); return; }
+  endingMeeting = true;
+  const btn = el('endMeetingBtn');
+  btn.disabled = true;
+  try {
+    const live = ['them', 'me'].filter((w) => sources[w]);
+    if (live.length) {
+      setStatus('Recogiendo las últimas frases…', 'busy');
+      live.forEach((w) => { try { conns[w].control('Finalize'); } catch (_) {} });
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      live.forEach(flushInterim);
+      await Promise.all(live.map(stopSource));
+    }
+    // Chinese mode: wait for translations still in flight.
+    await Promise.all(bubbles.filter((b) => b.tr && (b.trTimer || b.trPromise)).map((b) => translateBubble(b).catch(() => '')));
+    if (!(await summarizeConversation())) {
+      setStatus('No se pudo resumir: la conversación sigue en pantalla, reintenta con 📝 Resumir', true);
+      return;
+    }
+    await clearAll();
+    setStatus('Reunión terminada · resumen guardado en 🧠 Memoria');
+  } finally {
+    endingMeeting = false;
+    btn.disabled = false;
+  }
 }
 
 async function proposeNextSteps() {
@@ -810,8 +875,174 @@ async function proposeNextSteps() {
 el('memBtn').onclick = openMemPanel;
 el('memClose').onclick = closeMemPanel;
 el('summarizeBtn').onclick = summarizeConversation;
+el('endMeetingBtn').onclick = endMeeting;
 el('memSummarize').onclick = summarizeConversation;
 el('memPlan').onclick = proposeNextSteps;
+el('memFolders').onclick = () => openFolder('');
+
+// --- history panel: browse saved sessions (one folder per conversation) ---
+const HIST_TABS = { 'resumen.md': 'Resumen', 'pendientes.md': 'Pendientes', 'ideas.md': 'Ideas', 'proximos-pasos.md': 'Próximos pasos', 'transcripcion.md': 'Transcripción' };
+let histSessions = [], histSelected = '', histCurrent = '', histDoc = null, histTab = '', histSearchTimer = null;
+
+// Inline **bold** and _italic_ as DOM nodes (never innerHTML).
+function mdInline(target, text) {
+  for (const part of String(text).split(/(\*\*[^*]+\*\*|(?:^|(?<=\s))_[^_]+_(?=\s|$))/)) {
+    if (!part) continue;
+    if (/^\*\*[^*]+\*\*$/.test(part)) target.appendChild(mk('strong', null, part.slice(2, -2)));
+    else if (/^_[^_]+_$/.test(part)) target.appendChild(mk('em', null, part.slice(1, -1)));
+    else target.appendChild(document.createTextNode(part));
+  }
+}
+// Minimal Markdown for the session files: headings, lists, checkboxes, quotes.
+function mdRender(target, md) {
+  target.replaceChildren();
+  let ul = null;
+  for (const raw of String(md || '').replace(/\r\n/g, '\n').split('\n')) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { ul = null; continue; }
+    const h = line.match(/^(#{1,3})\s+(.*)$/);
+    const li = line.match(/^\s*[-*]\s+(?:\[( |x|X)\]\s+)?(.*)$/);
+    if (h) {
+      ul = null;
+      const n = mk(['h3', 'h4', 'h5'][h[1].length - 1]);
+      mdInline(n, h[2]);
+      target.appendChild(n);
+    } else if (li) {
+      if (!ul) { ul = mk('ul'); target.appendChild(ul); }
+      const item = mk('li', li[1] == null ? '' : li[1] === ' ' ? 'todo' : 'done');
+      if (li[1] != null) item.appendChild(document.createTextNode(li[1] === ' ' ? '☐ ' : '☑ '));
+      mdInline(item, li[2]);
+      ul.appendChild(item);
+    } else if (/^>\s?/.test(line)) {
+      ul = null;
+      const q = mk('blockquote');
+      mdInline(q, line.replace(/^>\s?/, ''));
+      target.appendChild(q);
+    } else {
+      ul = null;
+      const p = mk('p', /^_[^_]+_$/.test(line) ? 'muted' : '');
+      mdInline(p, line);
+      target.appendChild(p);
+    }
+  }
+  if (!target.childNodes.length) target.appendChild(mk('p', 'muted', 'Archivo vacío.'));
+}
+const dateTimeLabel = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('es-CL', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+function setHistStatus(msg, isErr) {
+  el('histStatus').textContent = msg || '';
+  el('histStatus').style.color = isErr ? 'var(--err)' : '';
+}
+function renderHistList() {
+  const list = el('histList');
+  list.replaceChildren();
+  if (!histSessions.length) {
+    list.appendChild(mk('div', 'mem-empty', el('histSearch').value.trim() ? 'Sin resultados.' : 'Aún no hay conversaciones guardadas.'));
+    return;
+  }
+  for (const s of histSessions) {
+    const b = mk('button', 'hist-item' + (s.id === histSelected ? ' sel' : ''));
+    b.type = 'button';
+    b.setAttribute('role', 'option');
+    b.setAttribute('aria-selected', String(s.id === histSelected));
+    b.appendChild(mk('span', 't', s.title));
+    const d = mk('span', 'd', dateTimeLabel(s.startedAt));
+    if (s.mode) d.appendChild(mk('span', 'badge' + (s.mode === 'meeting' ? ' meeting' : ''), s.mode === 'meeting' ? 'Reunión' : 'Entrevista'));
+    if (s.mode !== 'interview' && !s.hasSummary) d.appendChild(mk('span', 'badge pending', 'sin resumen'));
+    if (s.id === histCurrent) d.appendChild(mk('span', 'badge live', 'en curso'));
+    b.appendChild(d);
+    if (s.summary) b.appendChild(mk('span', 's', s.summary));
+    b.onclick = () => selectHistory(s.id);
+    list.appendChild(b);
+  }
+}
+async function loadHistory(query) {
+  const r = await window.api.historyList(query || '');
+  if (!r || !r.ok) { setHistStatus('No se pudo leer el historial: ' + (r && r.error || 'error'), true); return; }
+  histSessions = r.sessions;
+  histCurrent = r.current || '';
+  renderHistList();
+}
+function renderHistTab() {
+  const tabs = el('histTabs');
+  tabs.replaceChildren();
+  for (const f of histDoc.info.files) {
+    const t = mk('button', null, HIST_TABS[f] || f);
+    t.type = 'button';
+    t.setAttribute('role', 'tab');
+    t.setAttribute('aria-selected', String(f === histTab));
+    t.onclick = () => { histTab = f; renderHistTab(); };
+    tabs.appendChild(t);
+  }
+  mdRender(el('histContent'), histDoc.files[histTab] || '');
+  el('histContent').scrollTop = 0;
+}
+async function selectHistory(id) {
+  histSelected = id;
+  renderHistList();
+  setHistStatus('');
+  const r = await window.api.historyRead(id);
+  if (histSelected !== id) return;
+  if (!r || !r.ok) { setHistStatus(r && r.error || 'No se pudo abrir', true); return; }
+  histDoc = r;
+  const info = r.info;
+  el('histEmpty').hidden = true;
+  el('histView').hidden = false;
+  el('histTitle').textContent = info.title;
+  el('histDate').textContent = dateTimeLabel(info.startedAt) + (info.kind === 'file' ? ' · log antiguo' : '');
+  const canSummarize = info.mode !== 'interview';
+  el('histSummarize').hidden = !canSummarize;
+  el('histSummarize').textContent = info.hasSummary ? '↻ Volver a resumir' : '📝 Resumir';
+  el('histSummarize').title = info.kind === 'file'
+    ? 'Resume esta conversación (el log se mueve a su propia carpeta)'
+    : 'Genera resumen, pendientes, ideas y próximos pasos, y lo guarda en la memoria';
+  if (!info.files.includes(histTab)) histTab = info.files.includes('resumen.md') ? 'resumen.md' : info.files[0];
+  renderHistTab();
+}
+async function openHistory(id) {
+  if (isCompact()) setLayout('expanded');
+  el('ctxPanel').hidden = true;
+  el('memPanel').hidden = true;
+  el('histPanel').hidden = false;
+  el('histSearch').value = '';
+  await loadHistory('');
+  const pick = id && histSessions.some((s) => s.id === id) ? id : (histSelected && histSessions.some((s) => s.id === histSelected) ? histSelected : '');
+  if (pick) await selectHistory(pick);
+  else { histDoc = null; el('histView').hidden = true; el('histEmpty').hidden = false; }
+  el('histSearch').focus();
+}
+function closeHistory() { el('histPanel').hidden = true; el('historyBtn').focus(); }
+
+el('historyBtn').onclick = () => openHistory('');
+el('memHistory').onclick = () => openHistory('');
+el('histClose').onclick = closeHistory;
+el('histFolders').onclick = () => openFolder('');
+el('histOpen').onclick = () => { if (histDoc) openFolder(histDoc.info.path); };
+el('histSearch').oninput = () => {
+  clearTimeout(histSearchTimer);
+  histSearchTimer = setTimeout(() => loadHistory(el('histSearch').value), 250);
+};
+el('histSummarize').onclick = async () => {
+  if (!histDoc) return;
+  const btn = el('histSummarize');
+  btn.disabled = true;
+  setHistStatus('Resumiendo la conversación y actualizando pendientes…');
+  let r;
+  try { r = await window.api.historySummarize(histDoc.info.id); } catch (err) { r = { ok: false, error: err.message || String(err) }; }
+  btn.disabled = false;
+  if (!r || !r.ok) { setHistStatus('No se pudo resumir: ' + (r && r.error || 'error'), true); return; }
+  memory = r.memory;
+  configureGateway(false); // live notes know the updated pending items
+  histTab = 'resumen.md';
+  await loadHistory(el('histSearch').value);
+  await selectHistory(r.id);
+  setHistStatus('✓ Resumen guardado en la carpeta y en 🧠 Memoria');
+};
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !el('histPanel').hidden) { ev.preventDefault(); closeHistory(); }
+});
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !el('memPanel').hidden) { ev.preventDefault(); closeMemPanel(); }
 });
@@ -937,6 +1168,7 @@ el('settings').onclick = async () => {
   const c = await window.api.getContext();
   el('meetingContext').value = c.meetingContext || '';
   el('memPanel').hidden = true;
+  el('histPanel').hidden = true;
   el('cv').value = c.cv || '';
   el('jd').value = c.jd || '';
   el('responseChars').value = c.responseChars || 500;

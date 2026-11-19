@@ -21,7 +21,7 @@
              background:rgba(0,0,0,0.28); border-bottom:1px solid var(--line); user-select:none; flex:none; }
   #toolbar .spacer { flex:1; min-width:12px; }
   /* Electron drag regions swallow clicks even under overlays: opt every overlay out. */
-  #toolbar button, #toolbar select, #strip button, #panes, #ctxPanel, #ctxPanel *, #memPanel, #memPanel *, dialog button, dialog input, dialog summary { -webkit-app-region: no-drag; }
+  #toolbar button, #toolbar select, #strip button, #panes, #ctxPanel, #ctxPanel *, #memPanel, #memPanel *, #histPanel, #histPanel *, dialog button, dialog input, dialog summary { -webkit-app-region: no-drag; }
   .group { display:flex; gap:2px; padding:2px; border:1px solid var(--line); border-radius:9px; background:rgba(255,255,255,.03); }
   button.src { position:relative; width:34px; height:30px; padding:0; font-size:15px; background:transparent; border-color:transparent; color:var(--mut); }
   button.src:hover { color:var(--fg); background:rgba(255,255,255,.08); border-color:transparent; }
@@ -191,6 +191,8 @@
   .mode-select:hover { border-color:var(--line-strong); }
   .mode-select option { background:#1b1f29; color:var(--fg); }
   #app.meeting .interview-only, #app:not(.meeting) .meeting-only { display:none !important; }
+  button.end-meeting { color:#ffb3b3; border-color:rgba(224,85,85,.45); background:rgba(224,85,85,.12); }
+  button.end-meeting:hover { background:rgba(224,85,85,.25); border-color:var(--danger); }
   #ctxPanel #meetingContext { min-height:120px; }
 
   /* --- memory panel (overlay, meeting mode) --- */
@@ -220,8 +222,54 @@
   .mem-meeting summary { cursor:pointer; font-weight:600; }
   .mem-meeting summary .muted { font-weight:400; margin-left:6px; }
   .mem-meeting .mem-result { margin-top:8px; border-color:var(--line); background:transparent; }
-  .mem-meeting .mem-del { margin-top:6px; }
+  .mem-meeting .mem-del, .mem-meeting .mem-folder { margin-top:6px; margin-right:6px; }
+  .mem-result .mem-folder { margin-top:10px; }
   details.mem-done-wrap summary { cursor:pointer; color:var(--mut); font-size:12px; }
+
+  /* --- history panel: browse saved sessions --- */
+  #histPanel { position:absolute; inset:0; z-index:10; background:rgba(12,14,19,0.98); flex-direction:column; }
+  #histPanel[hidden] { display:none; }
+  #histPanel:not([hidden]) { display:flex; }
+  .hist-body { flex:1; min-height:0; display:flex; }
+  .hist-side { width:280px; flex:none; display:flex; flex-direction:column; border-right:1px solid var(--line); min-height:0; }
+  .hist-search { margin:10px; padding:6px 10px; font:inherit; font-size:12px; color:var(--fg); background:var(--card);
+    border:1px solid var(--line); border-radius:8px; }
+  .hist-search:focus-visible { outline:2px solid var(--acc); outline-offset:1px; }
+  .hist-list { flex:1; min-height:0; overflow:auto; padding:0 8px 8px; display:flex; flex-direction:column; gap:4px; }
+  .hist-item { display:block; width:100%; text-align:left; padding:8px 10px; border-radius:8px; background:transparent; border-color:transparent; }
+  .hist-item:hover { background:rgba(255,255,255,.06); border-color:transparent; }
+  .hist-item.sel { background:rgba(110,168,254,.14); border-color:rgba(110,168,254,.4); }
+  .hist-item .t { display:block; font-weight:600; font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .hist-item .d { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:2px; font-size:11px; color:var(--mut); }
+  .hist-item .s { display:block; margin-top:3px; font-size:11.5px; color:var(--mut); overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  .badge { font-size:10px; padding:0 6px; border-radius:999px; border:1px solid var(--line-strong); color:var(--mut); }
+  .badge.meeting { color:var(--acc); border-color:rgba(110,168,254,.4); }
+  .badge.pending { color:var(--warn); border-color:rgba(242,196,107,.4); }
+  .badge.live { color:var(--ok); border-color:rgba(95,211,154,.4); }
+  .hist-detail { flex:1; min-width:0; display:flex; flex-direction:column; min-height:0; }
+  .hist-empty { margin:auto; color:var(--mut); font-size:12.5px; padding:20px; text-align:center; }
+  #histView { flex:1; min-height:0; display:flex; flex-direction:column; }
+  #histView[hidden] { display:none; }
+  .hist-top { display:flex; align-items:flex-start; gap:8px; padding:10px 14px 6px; flex-wrap:wrap; }
+  .hist-top .ttl { flex:1; min-width:160px; }
+  .hist-top strong { display:block; font-size:14px; }
+  .hist-tabs { display:flex; gap:4px; padding:0 14px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .hist-tabs button { border-radius:8px 8px 0 0; border-bottom-color:transparent; background:transparent; color:var(--mut); padding:5px 10px; }
+  .hist-tabs button[aria-selected="true"] { color:var(--fg); background:var(--card); border-color:var(--line); border-bottom-color:var(--card); }
+  .md { flex:1; min-height:0; overflow:auto; padding:12px 16px; font-size:12.5px; line-height:1.55; user-select:text; }
+  .md h3 { margin:0 0 4px; font-size:15px; }
+  .md h4 { margin:14px 0 6px; font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--acc); }
+  .md h5 { margin:12px 0 4px; font-size:12.5px; }
+  .md p { margin:0 0 8px; }
+  .md ul { margin:0 0 8px; padding-left:20px; }
+  .md li.todo, .md li.done { list-style:none; margin-left:-18px; }
+  .md li.done { color:var(--mut); text-decoration:line-through; }
+  .md blockquote { margin:0 0 8px; padding:4px 10px; border-left:3px solid var(--line-strong); color:var(--mut); }
+  .md .muted { font-style:italic; }
+  @media (max-width: 720px) {
+    .hist-body { flex-direction:column; }
+    .hist-side { width:auto; max-height:38%; border-right:0; border-bottom:1px solid var(--line); }
+  }
 
   /* --- practice: replaces the main view and fills the whole window --- */
   #app.practice-mode > :not(dialog) { display:none !important; }
@@ -302,12 +350,14 @@
       </div>
       <button id="answerBtn" class="tb interview-only" title="Pedir respuesta ahora (Ctrl+Shift+Enter)">Responder <kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>↵</kbd></button>
       <button id="summarizeBtn" class="tb meeting-only" title="Resumir la conversación: ideas, pendientes y próximos pasos (se guarda en la memoria)">📝 Resumir</button>
+      <button id="endMeetingBtn" class="tb meeting-only end-meeting" title="Terminar la reunión: recoge las últimas frases, deja de escuchar, resume y guarda en la memoria">⏹ Terminar</button>
       <button id="memBtn" class="tb meeting-only" title="Memoria: pendientes y conversaciones anteriores">🧠 Memoria</button>
       <span class="spacer"></span>
       <span class="move" title="Arrastra para mover" aria-hidden="true">✥</span>
       <button id="layoutBtn" class="icon" title="Expandir" aria-label="Expandir">⤢</button>
       <span id="timer" class="timer" title="Duración de la sesión">⏱ 00:00</span>
       <span class="sep" aria-hidden="true"></span>
+      <button id="historyBtn" class="icon" title="Historial: conversaciones anteriores" aria-label="Historial">📚</button>
       <button id="settings" class="icon" title="Configuración (CV, cargo, formato)" aria-label="Configuración">⚙</button>
       <button id="practiceOpen" class="icon interview-only" title="Práctica de entrevista" aria-label="Práctica de entrevista">🎤</button>
       <button id="captureToggle" class="icon capture-toggle" title="Oculto en capturas de pantalla. Clic para mostrarlo" aria-label="Mostrar en capturas de pantalla" aria-pressed="false">📷</button>
@@ -438,15 +488,43 @@
           </details>
         </section>
         <section class="mem-section">
-          <h3>Conversaciones anteriores</h3>
+          <h3>Conversaciones anteriores <button id="memHistory" class="small" type="button">📚 Ver historial completo</button></h3>
           <div id="memMeetings"></div>
         </section>
       </div>
       <div class="ctx-foot">
         <span id="memInfo" class="muted"></span>
         <span class="spacer"></span>
+        <button id="memFolders" type="button" title="Abrir la carpeta con todas las conversaciones guardadas">📂 Carpetas</button>
         <button id="memPlan" type="button" title="Propone próximos pasos e iniciativas a partir de la memoria">💡 Proponer próximos pasos</button>
         <button id="memSummarize" class="primary" type="button">📝 Resumir conversación actual</button>
+      </div>
+    </div>
+
+    <div id="histPanel" role="dialog" aria-modal="true" aria-labelledby="histTitleHead" hidden>
+      <div class="ctx-head">
+        <strong id="histTitleHead">📚 Historial de conversaciones</strong>
+        <button id="histFolders" class="small" type="button" title="Abrir la carpeta transcripciones">📂 Carpetas</button>
+        <button id="histClose" class="icon close" type="button" title="Cerrar (Esc)" aria-label="Cerrar historial">✕</button>
+      </div>
+      <div class="hist-body">
+        <aside class="hist-side">
+          <input id="histSearch" class="hist-search" type="search" placeholder="Buscar en títulos, resúmenes y transcripciones…" aria-label="Buscar conversaciones" />
+          <div id="histList" class="hist-list" role="listbox" aria-label="Conversaciones"></div>
+        </aside>
+        <section class="hist-detail">
+          <div id="histEmpty" class="hist-empty">Elige una conversación de la lista.</div>
+          <div id="histView" hidden>
+            <div class="hist-top">
+              <div class="ttl"><strong id="histTitle"></strong><span id="histDate" class="muted"></span></div>
+              <button id="histSummarize" class="small primary" type="button">📝 Resumir</button>
+              <button id="histOpen" class="small" type="button">📂 Abrir carpeta</button>
+            </div>
+            <div id="histTabs" class="hist-tabs" role="tablist" aria-label="Archivos de la conversación"></div>
+            <div id="histContent" class="md" role="tabpanel"></div>
+          </div>
+          <div id="histStatus" class="muted" role="status" aria-live="polite" style="padding:0 14px 8px"></div>
+        </section>
       </div>
     </div>
 

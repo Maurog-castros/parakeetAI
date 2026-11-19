@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, globalShortcut, desktopCapturer, session, Tray, Menu, nativeImage, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, desktopCapturer, session, Tray, Menu, nativeImage, screen, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const llm = require('./llm');
@@ -7,6 +7,8 @@ const IS_MAC = process.platform === 'darwin';
 const MOD = IS_MAC ? 'Cmd' : 'Ctrl';
 const transcriptLog = require('./transcriptLog');
 const meetingMemory = require('./meetingMemory');
+const sessionFiles = require('./sessionFiles');
+const history = require('./history');
 
 // --- minimal .env loader (no dependency) ---
 function loadEnv() {
@@ -347,9 +349,11 @@ ipcMain.handle('tts', async (_e, text) => {
   }
 });
 
-// Session log: <inicio>.md. The renderer pushes a snapshot on every change;
-// one file per session, rewritten in place every LOG_AUTOSAVE_MS (if changed),
-// on "Limpiar" (then a new session starts) and when the app quits.
+// Session log: one folder per session, <inicio>[_<título>]/transcripcion.md
+// (+ resumen/pendientes/ideas/próximos pasos once summarised, see
+// sessionFiles.js). The renderer pushes a snapshot on every change; the
+// transcript is rewritten in place every LOG_AUTOSAVE_MS (if changed), on
+// "Limpiar" (then a new session starts) and when the app quits.
 // Dev: <project>/transcripciones. Packaged: Documents\ParakeetAI\transcripciones,
 // outside the app folder so rebuilding/replacing dist never deletes them.
 const LOG_DIR = app.isPackaged
@@ -357,22 +361,45 @@ const LOG_DIR = app.isPackaged
   : path.join(__dirname, '..', 'transcripciones');
 const LOG_AUTOSAVE_MS = 20000;
 let logSession = null; // latest snapshot from the renderer
-let logFile = null;    // file of the current session (set on first write)
+let logDir = null;     // folder of the current session (set on first write)
 let logDirty = false;
 
-function writeSessionLog() {
-  if (!logSession || !logDirty) return logFile;
-  const md = transcriptLog.buildTranscriptLog(logSession);
-  if (!md) return logFile;
+function freeDir(base) {
+  let dir = path.join(LOG_DIR, base);
+  for (let n = 2; fs.existsSync(dir); n++) dir = path.join(LOG_DIR, `${base}_${n}`);
+  return dir;
+}
+function ensureLogDir() {
+  if (logDir && fs.existsSync(logDir)) return logDir;
   fs.mkdirSync(LOG_DIR, { recursive: true });
-  if (!logFile) {
-    let file = path.join(LOG_DIR, transcriptLog.logFileName(logSession.startedAt || logSession.endedAt));
-    for (let n = 2; fs.existsSync(file); n++) file = file.replace(/(?:_\d+)?\.md$/, `_${n}.md`);
-    logFile = file;
-  }
-  fs.writeFileSync(logFile, md, 'utf8');
+  logDir = freeDir(sessionFiles.sessionFolderName(logSession && (logSession.startedAt || logSession.endedAt)));
+  fs.mkdirSync(logDir, { recursive: true });
+  return logDir;
+}
+function writeSessionLog() {
+  if (!logSession || !logDirty) return logDir;
+  const md = transcriptLog.buildTranscriptLog(logSession);
+  if (!md) return logDir;
+  fs.writeFileSync(path.join(ensureLogDir(), sessionFiles.TRANSCRIPT_FILE), md, 'utf8');
   logDirty = false;
-  return logFile;
+  return logDir;
+}
+// Appends the meeting title to a session folder name (once summarised).
+// Keeps the live session's logDir in sync if that is the folder renamed.
+function renameSessionDir(dir, startedAt, title) {
+  if (!dir) return dir;
+  const base = sessionFiles.sessionFolderName(startedAt, title);
+  const current = path.basename(dir);
+  if (current === base || new RegExp('^' + base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '_\\d+$').test(current)) return dir;
+  const target = freeDir(base);
+  try {
+    fs.renameSync(dir, target);
+    if (logDir && path.resolve(logDir) === path.resolve(dir)) logDir = target;
+    return target;
+  } catch (err) {
+    console.log('[log] rename failed', err.message);
+    return dir;
+  }
 }
 function safeWriteSessionLog() {
   try { return writeSessionLog(); } catch (err) { console.error('[log] write failed', err.message || err); return null; }
@@ -381,21 +408,16 @@ setInterval(safeWriteSessionLog, LOG_AUTOSAVE_MS).unref();
 app.on('before-quit', safeWriteSessionLog);
 
 ipcMain.on('update-transcript-log', (_e, session) => {
-  const summary = logSession && logSession.summary;
-  logSession = Object.assign({ summary }, session, { endedAt: new Date().toISOString() });
+  logSession = Object.assign({}, session, { endedAt: new Date().toISOString() });
   logDirty = true;
 });
 // "Limpiar": write the final version and start a new session file.
 ipcMain.handle('save-transcript-log', (_e, session) => {
   try {
-    if (session) {
-      const summary = logSession && logSession.summary;
-      logSession = Object.assign({ summary }, session, { endedAt: new Date().toISOString() });
-      logDirty = true;
-    }
-    const file = writeSessionLog();
-    logSession = null; logFile = null; logDirty = false;
-    return file ? { ok: true, file } : { ok: true, skipped: true };
+    if (session) { logSession = Object.assign({}, session, { endedAt: new Date().toISOString() }); logDirty = true; }
+    const dir = writeSessionLog();
+    logSession = null; logDir = null; logDirty = false;
+    return dir ? { ok: true, file: dir } : { ok: true, skipped: true };
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
   }
@@ -410,29 +432,86 @@ ipcMain.handle('set-mode', (_e, mode) => {
 
 ipcMain.handle('get-memory', () => memory);
 
-// Summarise the current conversation, store it in the memory (re-summarising
-// the same session replaces its previous version) and append it to the log.
+// Summarises a transcript, stores it in the memory (re-summarising the same
+// session replaces its previous version) and writes the summary files into
+// the session folder, renamed to include the title. getDir() returns the
+// folder once the summary is known (null: memory only).
+async function summarizeSession(transcript, startedAt, endedAt, getDir) {
+  const meetingId = meetingMemory.meetingIdFor(startedAt);
+  const raw = await llm.summarizeMeeting(transcript, llmContext(meetingId));
+  const parsed = meetingMemory.parseSummaryJson(raw);
+  if (!parsed) return { ok: false, error: 'el modelo no devolvió un resumen válido', raw: raw.slice(0, 2000) };
+  let dir = getDir();
+  if (dir) dir = renameSessionDir(dir, startedAt, meetingMemory.normalizeSummary(parsed).title);
+  const result = meetingMemory.applySummary(memory, parsed, { meetingId, startedAt, endedAt, folder: dir || '' });
+  memory = result.memory;
+  saveMemoryToDisk();
+  if (dir) {
+    const files = sessionFiles.meetingFiles(result.meeting, result.newItems, result.resolvedItems, meetingMemory.openItems(memory, meetingId));
+    try {
+      for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), content, 'utf8');
+    } catch (err) { console.error('[log] summary files failed', err.message || err); }
+  }
+  return { ok: true, meeting: result.meeting, newItems: result.newItems, resolvedItems: result.resolvedItems, memory, folder: dir || '' };
+}
+
+// The live conversation.
 ipcMain.handle('meeting-summarize', async (_e, session) => {
   try {
     const snap = session || logSession;
     if (!snap || !Array.isArray(snap.transcript) || !snap.transcript.length) return { ok: false, error: 'no hay conversación para resumir' };
-    const meetingId = meetingMemory.meetingIdFor(snap.startedAt);
-    const raw = await llm.summarizeMeeting(snap.transcript, llmContext(meetingId));
-    const parsed = meetingMemory.parseSummaryJson(raw);
-    if (!parsed) return { ok: false, error: 'el modelo no devolvió un resumen válido', raw: raw.slice(0, 2000) };
-    logSession = Object.assign({}, snap, { endedAt: new Date().toISOString() });
-    logDirty = true;
-    const file = safeWriteSessionLog();
-    const result = meetingMemory.applySummary(memory, parsed, { meetingId, startedAt: snap.startedAt, logFile: file || '' });
-    memory = result.memory;
-    saveMemoryToDisk();
-    logSession.summary = meetingMemory.summaryMarkdown(result.meeting, result.newItems, result.resolvedItems);
-    logDirty = true;
-    safeWriteSessionLog();
-    return { ok: true, meeting: result.meeting, newItems: result.newItems, resolvedItems: result.resolvedItems, memory };
+    const endedAt = new Date().toISOString();
+    return await summarizeSession(snap.transcript, snap.startedAt, endedAt, () => {
+      logSession = Object.assign({}, snap, { endedAt });
+      logDirty = true;
+      return safeWriteSessionLog();
+    });
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
   }
+});
+
+// --- history: browse saved sessions (transcripciones/) ---
+ipcMain.handle('history-list', (_e, query) => {
+  try { return { ok: true, sessions: history.listSessions(LOG_DIR, query), current: logDir ? path.basename(logDir) : '' }; }
+  catch (err) { return { ok: false, error: String(err && err.message || err) }; }
+});
+
+ipcMain.handle('history-read', (_e, id) => {
+  const s = history.readSession(LOG_DIR, id);
+  return s ? { ok: true, info: s.info, files: s.files } : { ok: false, error: 'sesión no encontrada' };
+});
+
+// Summarise a saved session (e.g. one closed without summary). Old flat logs
+// are first moved into their own folder.
+ipcMain.handle('history-summarize', async (_e, id) => {
+  try {
+    if (!history.resolveSession(LOG_DIR, id)) return { ok: false, error: 'sesión no encontrada' };
+    const started = history.stampDate(String(id));
+    const dir = history.migrateFlatLog(LOG_DIR, id);
+    const md = fs.readFileSync(path.join(dir, sessionFiles.TRANSCRIPT_FILE), 'utf8');
+    const { transcript } = transcriptLog.parseTranscriptLog(md, started);
+    if (!transcript.length) return { ok: false, error: 'la sesión no tiene transcripción' };
+    const startedAt = started.toISOString();
+    const endedAt = transcript[transcript.length - 1].time || startedAt;
+    const r = await summarizeSession(transcript, startedAt, endedAt, () => dir);
+    if (r.ok) r.id = path.basename(r.folder || dir);
+    return r;
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+// Opens a session folder (or the transcripciones root) in the file explorer.
+// Only paths inside LOG_DIR are allowed.
+ipcMain.handle('open-folder', async (_e, folder) => {
+  const rootDir = path.resolve(LOG_DIR);
+  let target = path.resolve(String(folder || rootDir));
+  if (target !== rootDir && !target.startsWith(rootDir + path.sep)) return { ok: false, error: 'ruta no permitida' };
+  if (!fs.existsSync(target)) target = rootDir;
+  fs.mkdirSync(target, { recursive: true });
+  const err = await shell.openPath(target);
+  return err ? { ok: false, error: err } : { ok: true };
 });
 
 ipcMain.handle('memory-initiatives', async () => {

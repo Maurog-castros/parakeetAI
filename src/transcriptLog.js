@@ -75,4 +75,35 @@ function buildTranscriptLog(session) {
   return lines.join('\n');
 }
 
-module.exports = { buildTranscriptLog, logFileName };
+// Inverse of buildTranscriptLog, enough to summarise a saved session:
+// returns { mode, transcript: [{who, text, translation, time}] }.
+// baseDate (session start) gives the date for the hh:mm:ss stamps.
+function parseTranscriptLog(md, baseDate) {
+  const text = String(md || '').replace(/\r\n/g, '\n');
+  const mode = /^#\s*Reuni[oó]n/m.test(text) ? 'meeting' : 'interview';
+  const base = new Date(baseDate);
+  const hasBase = !Number.isNaN(base.getTime());
+  const transcript = [];
+  let inTranscript = false;
+  for (const line of text.split('\n')) {
+    if (/^##\s/.test(line)) { inTranscript = /^##\s*Transcripci[oó]n/.test(line); continue; }
+    if (!inTranscript) continue;
+    const m = line.match(/^\*\*\[(\d\d):(\d\d):(\d\d)\]\s*([^:*]+):\*\*\s*(.*)$/);
+    if (m) {
+      let time = null;
+      if (hasBase) {
+        const d = new Date(base);
+        d.setHours(+m[1], +m[2], +m[3], 0);
+        if (d < base - 60000) d.setDate(d.getDate() + 1); // crossed midnight
+        time = d.toISOString();
+      }
+      transcript.push({ who: /^(yo|t[uú])$/i.test(m[4].trim()) ? 'me' : 'them', text: m[5].trim(), translation: '', time });
+      continue;
+    }
+    const tr = line.match(/^>\s*\*\*Traducci[oó]n:\*\*\s*(.*)$/);
+    if (tr && transcript.length) transcript[transcript.length - 1].translation = tr[1].trim();
+  }
+  return { mode, transcript: transcript.filter((t) => t.text) };
+}
+
+module.exports = { buildTranscriptLog, logFileName, parseTranscriptLog };
