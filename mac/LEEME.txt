@@ -1,0 +1,41 @@
+ParakeetAI para Mac — cómo instalarlo
+=====================================
+
+Necesitas: macOS 14.2 (Sonoma) o más nuevo, internet, unos 10 minutos.
+
+1) Descomprime el .zip (doble clic). Queda la carpeta "ParakeetAI-Mac".
+
+2) Abre la app Terminal (Cmd+Espacio, escribe "Terminal", Enter).
+
+3) En Terminal escribe:  bash   (con un espacio al final, SIN pulsar Enter)
+   Luego arrastra el archivo "Instalar ParakeetAI.command" dentro de la
+   ventana de Terminal y pulsa Enter.
+   (Usar Terminal evita el bloqueo de macOS a archivos descargados.)
+
+   El instalador descarga lo necesario, construye la app y la abre.
+   Queda en tu carpeta de usuario > Aplicaciones > ParakeetAI.
+
+4) Permisos (solo la primera vez):
+   - Pulsa el botón 🖥 (entrevistador = audio del sistema). macOS pedirá
+     "Grabación de pantalla y audio del sistema": acepta.
+   - Pulsa el botón 🎙 (tu micrófono): acepta el permiso de micrófono.
+   - Si no salió el aviso, o sale un error de audio bloqueado:
+     Ajustes del Sistema > Privacidad y seguridad >
+     "Grabación de pantalla y audio del sistema" -> activa ParakeetAI.
+   - Después de dar permisos: cierra ParakeetAI (Cmd+Shift+Q) y ábrelo otra vez.
+
+Uso rápido
+- Cmd+Shift+Space: mostrar / ocultar el asistente.
+- Cmd+Shift+M: el ratón atraviesa la ventana (activar/desactivar).
+- Cmd+Shift+Q: salir.
+- El punto de colores en la barra de menú (arriba a la derecha) también
+  muestra/oculta y tiene la opción Salir.
+- ⚙ Configuración: pega la descripción del cargo y tu CV.
+
+Prueba: pon un video de YouTube con alguien haciendo una pregunta de
+entrevista y pulsa el botón 🖥; debería transcribir y sugerir.
+
+Nota: al compartir pantalla en Zoom/Meet/Teams, macOS reciente puede mostrar
+el asistente a los demás. Pruébalo antes de una llamada real.
+
+No compartas esta carpeta: contiene claves de acceso privadas (archivo .env).

@@ -5,6 +5,18 @@ const SEND_SAMPLES = 3200; // ~200ms per WS frame
 const el = (id) => document.getElementById(id);
 const appEl = el('app'), statusEl = el('status');
 const txList = el('txList'), chipsEl = el('chips'), ansEl = el('ans');
+const IS_MAC = window.api && window.api.platform === 'darwin';
+
+// macOS: global shortcuts are registered as CommandOrControl -> show Cmd (⌘).
+// Ctrl+←/→ (answer navigation) really is Ctrl on every platform, so skip those.
+if (IS_MAC) {
+  for (const id of ['answerBtn', 'clickthru', 'minimize', 'close', 'ctBanner', 'clear']) {
+    const n = el(id);
+    if (!n) continue;
+    if (n.title) n.title = n.title.replace(/Ctrl\+Shift/g, 'Cmd+Shift');
+    n.querySelectorAll('kbd').forEach((k) => { if (k.textContent === 'Ctrl') k.textContent = '⌘'; });
+  }
+}
 
 let clickThrough = false;
 let sttLang = 'es', sttUrl = '', sttKey = '', sttModel = 'nova-2';
@@ -130,7 +142,7 @@ function addFinal(who, text) {
   txEmpty(false);
   let b = openBubble[who];
   if (!b) {
-    b = Object.assign({ who, text: '' }, makeMsg(who));
+    b = Object.assign({ who, text: '', time: new Date() }, makeMsg(who));
     bubbles.push(b);
     openBubble[who] = b;
     txList.appendChild(b.el);
@@ -138,6 +150,7 @@ function addFinal(who, text) {
   b.text += (b.text ? ' ' : '') + text;
   b.txt.textContent = b.text;
   addChip(who, text, false);
+  scheduleSessionLog();
   scrollTx();
 }
 function setInterim(who, text) {
@@ -281,6 +294,7 @@ function onGatewaySuggestion(who, m) {
     a.text = String(m.suggestion || a.text);
     if (isNoAnswer(a.text.trim())) { removeAnswer(a); if (who === 'them') setStatus('Sin pregunta'); return; }
     markQuestion(who);
+    scheduleSessionLog();
     setStatus(idleStatus());
     renderAnswer();
   } else if (m.status === 'cancelled') {
@@ -413,6 +427,13 @@ async function startSource(who) {
       stream = new MediaStream(display.getAudioTracks());
       const at = stream.getAudioTracks()[0];
       if (!at) throw new Error('sin pista de audio (loopback)');
+      // macOS: if "System Audio Recording" isn't granted, Chromium hands back a
+      // track that is already 'ended' and never delivers samples (no error).
+      if (at.readyState === 'ended') {
+        throw new Error(IS_MAC
+          ? 'macOS bloqueó el audio del sistema. Activa ParakeetAI en Ajustes > Privacidad y seguridad > Grabación de pantalla y audio del sistema, y reabre la app.'
+          : 'la pista de audio del sistema terminó al iniciar');
+      }
       try { await at.applyConstraints(noDsp); } catch (_) {}
       console.log('[cap] track', at.label, JSON.stringify(at.getSettings()));
     } else {
@@ -456,14 +477,53 @@ async function stop() {
 el('sysBtn').onclick = () => (sources.them ? stopSource('them').then(() => setStatus('Entrevistador en pausa')) : startSource('them'));
 el('micBtn').onclick = () => (sources.me ? stopSource('me').then(() => setStatus('Micrófono apagado')) : startSource('me'));
 
-function clearAll() {
+// --- session log (transcripciones/) ---
+// Snapshot of the session: transcript + finished answers.
+function sessionSnapshot() {
+  const transcript = bubbles.map((b) => ({ who: b.who, text: b.text, time: b.time && b.time.toISOString() }));
+  const done = answers.filter((a) => a.done && !isNoAnswer(a.text.trim()))
+    .map((a) => ({ who: a.who, question: a.question, text: limitChars(a.text), mode: a.mode, time: a.time.toISOString() }));
+  if (!transcript.length && !done.length) return null;
+  const times = [...transcript, ...done].map((x) => x.time).filter(Boolean).sort();
+  return { startedAt: times[0], transcript, answers: done };
+}
+// Main keeps the latest snapshot and autosaves it (periodically and on quit).
+let logTimer = null;
+function pushSessionLog() {
+  clearTimeout(logTimer); logTimer = null;
+  const snap = sessionSnapshot();
+  if (snap) window.api.updateTranscriptLog(snap);
+}
+function scheduleSessionLog() {
+  if (!logTimer) logTimer = setTimeout(pushSessionLog, 1000);
+}
+window.addEventListener('beforeunload', pushSessionLog);
+
+// Saves the final version before clearing; main then starts a new file.
+async function saveSessionLog() {
+  clearTimeout(logTimer); logTimer = null;
+  const snap = sessionSnapshot();
+  if (!snap) return null;
+  try {
+    const r = await window.api.saveTranscriptLog(snap);
+    if (!r || !r.ok) { setStatus('No se pudo guardar el log: ' + (r && r.error || 'error'), true); return null; }
+    return r.file || null;
+  } catch (err) {
+    setStatus('No se pudo guardar el log: ' + (err.message || err), true);
+    return null;
+  }
+}
+
+async function clearAll() {
+  const saved = await saveSessionLog();
   bubbles = []; openBubble.them = openBubble.me = null; interimEl.them = interimEl.me = null;
   txList.querySelectorAll('.msg').forEach((m) => m.remove());
   txEmpty(true);
   chipsEl.replaceChildren();
   answers = []; view = -1; renderAnswer();
   configureGateway(true); // forget previous turns on the gateway too
-  setStatus(running ? idleStatus() : 'Limpio');
+  if (saved) setStatus('Log guardado: ' + saved.split(/[\\/]/).pop());
+  else if (!statusEl.classList.contains('err')) setStatus(running ? idleStatus() : 'Limpio');
 }
 el('clear').onclick = clearAll;
 

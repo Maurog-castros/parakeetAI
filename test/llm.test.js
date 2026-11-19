@@ -34,7 +34,7 @@ test('normaliza formato e instrucciones del usuario', () => {
   assert.equal(normalizeResponseFormat('paragraph'), 'paragraph');
   assert.equal(normalizeResponseFormat('formato-inventado'), 'bullets');
   assert.equal(normalizeResponseInstructions('  Responde con ejemplos  '), 'Responde con ejemplos');
-  assert.equal(normalizeResponseInstructions('x'.repeat(1200)).length, 1000);
+  assert.equal(normalizeResponseInstructions('x'.repeat(4200)).length, 4000);
 });
 
 test('el prompt respeta bullets o texto continuo', () => {

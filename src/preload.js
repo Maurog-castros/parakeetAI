@@ -2,12 +2,15 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
+  platform: process.platform,
   config: () => ipcRenderer.invoke('config'),
   suggest: (transcript) => ipcRenderer.invoke('suggest', transcript),
   gatewayConfig: (resetHistory, role) => ipcRenderer.invoke('gateway-config', resetHistory, role),
   practiceQuestion: (history) => ipcRenderer.invoke('practice-question', history),
   evaluatePractice: (history) => ipcRenderer.invoke('practice-evaluate', history),
   speak: (text) => ipcRenderer.invoke('tts', text),
+  saveTranscriptLog: (session) => ipcRenderer.invoke('save-transcript-log', session),
+  updateTranscriptLog: (session) => ipcRenderer.send('update-transcript-log', session),
   getContext: () => ipcRenderer.invoke('get-context'),
   saveContext: (data) => ipcRenderer.invoke('save-context', data),
   setClickThrough: (on) => ipcRenderer.send('set-click-through', on),

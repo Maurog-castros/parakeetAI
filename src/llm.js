@@ -7,7 +7,7 @@ const DEFAULT_RESPONSE_CHARS = 500;
 const MIN_RESPONSE_CHARS = 120;
 const MAX_RESPONSE_CHARS = 1500;
 const DEFAULT_RESPONSE_FORMAT = 'bullets';
-const MAX_RESPONSE_INSTRUCTIONS = 1000;
+const MAX_RESPONSE_INSTRUCTIONS = 4000;
 
 function normalizeResponseChars(value) {
   const parsed = Number.parseInt(value, 10);

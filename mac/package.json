@@ -1,0 +1,17 @@
+{
+  "name": "parakeet-mvp",
+  "productName": "ParakeetAI",
+  "version": "0.1.0",
+  "description": "MVP interview-assistant overlay: system-audio capture -> STT -> LLM suggested answers",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build": "node build.js"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "45.2.3"
+  }
+}

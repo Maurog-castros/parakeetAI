@@ -3,6 +3,9 @@ const { app, BrowserWindow, ipcMain, globalShortcut, desktopCapturer, session, T
 const path = require('path');
 const fs = require('fs');
 const llm = require('./llm');
+const IS_MAC = process.platform === 'darwin';
+const MOD = IS_MAC ? 'Cmd' : 'Ctrl';
+const transcriptLog = require('./transcriptLog');
 
 // --- minimal .env loader (no dependency) ---
 function loadEnv() {
@@ -86,10 +89,14 @@ function createWindow() {
   });
 
   win.setAlwaysOnTop(true, 'screen-saver');
+  // macOS: keep the overlay over full-screen meetings and on every Space.
+  if (IS_MAC) { try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch (_) {} }
   applyShareVisibility();
 
-  win.webContents.on('console-message', (_e, level, message) => {
-    console.log('[renderer]', message);
+  // Electron 35+ passes a single event object; older versions pass positional args.
+  // Declared with one parameter so Electron 35+ doesn't warn about positional args.
+  win.webContents.on('console-message', function (e) {
+    console.log('[renderer]', e.message !== undefined ? e.message : arguments[2]);
   });
 
   // No taskbar entry: if Windows minimizes it anyway, bring it straight back.
@@ -163,7 +170,7 @@ function updateTray() {
   const visible = !!(win && win.isVisible() && !win.isMinimized());
   const live = liveState.them || liveState.me;
   tray.setImage(trayIcon(live ? 'live' : 'idle', !visible));
-  tray.setToolTip('ParakeetAI · ' + stateText() + (visible ? '' : '\nVentana oculta — Ctrl+Shift+Space o clic aquí'));
+  tray.setToolTip('ParakeetAI · ' + stateText() + (visible ? '' : '\nVentana oculta — ' + MOD + '+Shift+Space o clic aquí'));
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'ParakeetAI · ' + stateText(), enabled: false },
     { type: 'separator' },
@@ -202,7 +209,10 @@ function hideWindow() {
 }
 
 // System-audio loopback: when the renderer calls getDisplayMedia, grant a screen
-// source for video (required by the API) plus 'loopback' audio (Windows system audio).
+// source for video (required by the API) plus 'loopback' audio. Windows: WASAPI
+// loopback. macOS 14.2+: CoreAudio tap (Electron 39+), which needs the
+// NSAudioCaptureUsageDescription Info.plist key and the "System Audio Recording"
+// permission; without it the track arrives already 'ended' (no JS error).
 function installLoopbackHandler() {
   session.defaultSession.setDisplayMediaRequestHandler(
     (request, callback) => {
@@ -215,6 +225,13 @@ function installLoopbackHandler() {
 }
 
 app.whenReady().then(() => {
+  if (IS_MAC) {
+    try {
+      const { systemPreferences } = require('electron');
+      console.log('[mac] screen:', systemPreferences.getMediaAccessStatus('screen'),
+        '| mic:', systemPreferences.getMediaAccessStatus('microphone'));
+    } catch (_) {}
+  }
   loadContext();
   installLoopbackHandler();
   createWindow();
@@ -292,6 +309,52 @@ ipcMain.handle('tts', async (_e, text) => {
     });
     if (!r.ok) throw new Error(`Deepgram TTS -> ${r.status}: ${(await r.text()).slice(0, 160)}`);
     return { ok: true, audio: Array.from(new Uint8Array(await r.arrayBuffer())), model };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+// Session log: <project>/transcripciones/<inicio>.md. The renderer pushes a
+// snapshot on every change; one file per session, rewritten in place every
+// LOG_AUTOSAVE_MS (if changed), on "Limpiar" (then a new session starts) and
+// when the app quits.
+const LOG_DIR = path.join(__dirname, '..', 'transcripciones');
+const LOG_AUTOSAVE_MS = 20000;
+let logSession = null; // latest snapshot from the renderer
+let logFile = null;    // file of the current session (set on first write)
+let logDirty = false;
+
+function writeSessionLog() {
+  if (!logSession || !logDirty) return logFile;
+  const md = transcriptLog.buildTranscriptLog(logSession);
+  if (!md) return logFile;
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+  if (!logFile) {
+    let file = path.join(LOG_DIR, transcriptLog.logFileName(logSession.startedAt || logSession.endedAt));
+    for (let n = 2; fs.existsSync(file); n++) file = file.replace(/(?:_\d+)?\.md$/, `_${n}.md`);
+    logFile = file;
+  }
+  fs.writeFileSync(logFile, md, 'utf8');
+  logDirty = false;
+  return logFile;
+}
+function safeWriteSessionLog() {
+  try { return writeSessionLog(); } catch (err) { console.error('[log] write failed', err.message || err); return null; }
+}
+setInterval(safeWriteSessionLog, LOG_AUTOSAVE_MS).unref();
+app.on('before-quit', safeWriteSessionLog);
+
+ipcMain.on('update-transcript-log', (_e, session) => {
+  logSession = Object.assign({}, session, { endedAt: new Date().toISOString() });
+  logDirty = true;
+});
+// "Limpiar": write the final version and start a new session file.
+ipcMain.handle('save-transcript-log', (_e, session) => {
+  try {
+    if (session) { logSession = Object.assign({}, session, { endedAt: new Date().toISOString() }); logDirty = true; }
+    const file = writeSessionLog();
+    logSession = null; logFile = null; logDirty = false;
+    return file ? { ok: true, file } : { ok: true, skipped: true };
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
   }
