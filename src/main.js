@@ -6,6 +6,7 @@ const llm = require('./llm');
 const IS_MAC = process.platform === 'darwin';
 const MOD = IS_MAC ? 'Cmd' : 'Ctrl';
 const transcriptLog = require('./transcriptLog');
+const meetingMemory = require('./meetingMemory');
 
 // --- minimal .env loader (no dependency) ---
 function loadEnv() {
@@ -38,6 +39,8 @@ let expandedHeight = 560;
 
 // --- interview context (CV + job description), persisted in userData ---
 let context = {
+  mode: 'interview',      // 'interview' | 'meeting'
+  meetingContext: '',     // meeting mode: who/what the conversation is about
   cv: '',
   jd: '',
   responseChars: 500,
@@ -52,9 +55,28 @@ function loadContext() {
   context.responseFormat = llm.normalizeResponseFormat(context.responseFormat);
   context.responseInstructions = llm.normalizeResponseInstructions(context.responseInstructions);
   context.shareInterfaceVisible = context.shareInterfaceVisible === true;
+  context.mode = llm.normalizeMode(context.mode);
+  context.meetingContext = llm.normalizeMeetingContext(context.meetingContext);
 }
 function saveContextToDisk() {
   try { fs.writeFileSync(contextFile(), JSON.stringify(context), 'utf8'); } catch (e) { console.log('[ctx] save err', e.message); }
+}
+
+// --- meeting memory (previous meetings + open action items), in userData ---
+let memory = meetingMemory.emptyMemory();
+function memoryFile() { return path.join(app.getPath('userData'), 'parakeet-memory.json'); }
+function loadMemory() {
+  try { memory = meetingMemory.normalizeMemory(JSON.parse(fs.readFileSync(memoryFile(), 'utf8'))); } catch (_) {}
+}
+function saveMemoryToDisk() {
+  try { fs.writeFileSync(memoryFile(), JSON.stringify(memory, null, 2), 'utf8'); } catch (e) { console.log('[mem] save err', e.message); }
+}
+// Context for LLM calls; meeting mode adds the memory (open items + last meetings).
+function llmContext(exceptMeetingId) {
+  if (context.mode !== 'meeting') return context;
+  return Object.assign({}, context, {
+    memoryContext: meetingMemory.buildMemoryContext(memory, { exceptMeetingId }),
+  });
 }
 
 function applyShareVisibility() {
@@ -233,6 +255,7 @@ app.whenReady().then(() => {
     } catch (_) {}
   }
   loadContext();
+  loadMemory();
   installLoopbackHandler();
   createWindow();
 
@@ -266,20 +289,30 @@ ipcMain.handle('config', () => {
     sttUrl: c.sttUrl,
     sttKey: c.sttKey,
     sttModel: c.sttModel,
+    // Chinese interviewer: the voice gateway (parakeet-tdt) has no Chinese, so
+    // that source goes straight to Deepgram (nova-2, zh-CN).
+    dgKey: process.env.DEEPGRAM_API_KEY || '',
   };
+});
+
+// Live translation of the interviewer's phrase (Chinese mode).
+ipcMain.handle('translate', async (_e, text, from) => {
+  try { return { ok: true, text: await llm.translate(text, from) }; }
+  catch (err) { return { ok: false, error: String(err && err.message || err) }; }
 });
 
 // Live interview answers come from the voice gateway on the STT socket; the
 // renderer sends this Configure (rules + CV/JD) when the connection opens.
 ipcMain.handle('gateway-config', (_e, resetHistory, role) => ({
-  configure: llm.gatewayConfigure(context, !!resetHistory, role === 'candidate' ? 'candidate' : 'interviewer'),
+  configure: llm.gatewayConfigure(llmContext(), !!resetHistory, role === 'candidate' ? 'candidate' : 'interviewer'),
+  mode: context.mode,
   responseChars: llm.normalizeResponseChars(context.responseChars),
 }));
 
 // Practice mode: model answer for the current question (local LLM call).
 ipcMain.handle('suggest', async (_e, transcript) => {
   try {
-    const text = await llm.suggest(transcript, context);
+    const text = await llm.suggest(transcript, llmContext());
     return { ok: true, text };
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
@@ -314,11 +347,14 @@ ipcMain.handle('tts', async (_e, text) => {
   }
 });
 
-// Session log: <project>/transcripciones/<inicio>.md. The renderer pushes a
-// snapshot on every change; one file per session, rewritten in place every
-// LOG_AUTOSAVE_MS (if changed), on "Limpiar" (then a new session starts) and
-// when the app quits.
-const LOG_DIR = path.join(__dirname, '..', 'transcripciones');
+// Session log: <inicio>.md. The renderer pushes a snapshot on every change;
+// one file per session, rewritten in place every LOG_AUTOSAVE_MS (if changed),
+// on "Limpiar" (then a new session starts) and when the app quits.
+// Dev: <project>/transcripciones. Packaged: Documents\ParakeetAI\transcripciones,
+// outside the app folder so rebuilding/replacing dist never deletes them.
+const LOG_DIR = app.isPackaged
+  ? path.join(app.getPath('documents'), 'ParakeetAI', 'transcripciones')
+  : path.join(__dirname, '..', 'transcripciones');
 const LOG_AUTOSAVE_MS = 20000;
 let logSession = null; // latest snapshot from the renderer
 let logFile = null;    // file of the current session (set on first write)
@@ -345,13 +381,18 @@ setInterval(safeWriteSessionLog, LOG_AUTOSAVE_MS).unref();
 app.on('before-quit', safeWriteSessionLog);
 
 ipcMain.on('update-transcript-log', (_e, session) => {
-  logSession = Object.assign({}, session, { endedAt: new Date().toISOString() });
+  const summary = logSession && logSession.summary;
+  logSession = Object.assign({ summary }, session, { endedAt: new Date().toISOString() });
   logDirty = true;
 });
 // "Limpiar": write the final version and start a new session file.
 ipcMain.handle('save-transcript-log', (_e, session) => {
   try {
-    if (session) { logSession = Object.assign({}, session, { endedAt: new Date().toISOString() }); logDirty = true; }
+    if (session) {
+      const summary = logSession && logSession.summary;
+      logSession = Object.assign({ summary }, session, { endedAt: new Date().toISOString() });
+      logDirty = true;
+    }
     const file = writeSessionLog();
     logSession = null; logFile = null; logDirty = false;
     return file ? { ok: true, file } : { ok: true, skipped: true };
@@ -360,9 +401,66 @@ ipcMain.handle('save-transcript-log', (_e, session) => {
   }
 });
 
+// --- meeting mode: summary + memory ---
+ipcMain.handle('set-mode', (_e, mode) => {
+  context.mode = llm.normalizeMode(mode);
+  saveContextToDisk();
+  return context.mode;
+});
+
+ipcMain.handle('get-memory', () => memory);
+
+// Summarise the current conversation, store it in the memory (re-summarising
+// the same session replaces its previous version) and append it to the log.
+ipcMain.handle('meeting-summarize', async (_e, session) => {
+  try {
+    const snap = session || logSession;
+    if (!snap || !Array.isArray(snap.transcript) || !snap.transcript.length) return { ok: false, error: 'no hay conversación para resumir' };
+    const meetingId = meetingMemory.meetingIdFor(snap.startedAt);
+    const raw = await llm.summarizeMeeting(snap.transcript, llmContext(meetingId));
+    const parsed = meetingMemory.parseSummaryJson(raw);
+    if (!parsed) return { ok: false, error: 'el modelo no devolvió un resumen válido', raw: raw.slice(0, 2000) };
+    logSession = Object.assign({}, snap, { endedAt: new Date().toISOString() });
+    logDirty = true;
+    const file = safeWriteSessionLog();
+    const result = meetingMemory.applySummary(memory, parsed, { meetingId, startedAt: snap.startedAt, logFile: file || '' });
+    memory = result.memory;
+    saveMemoryToDisk();
+    logSession.summary = meetingMemory.summaryMarkdown(result.meeting, result.newItems, result.resolvedItems);
+    logDirty = true;
+    safeWriteSessionLog();
+    return { ok: true, meeting: result.meeting, newItems: result.newItems, resolvedItems: result.resolvedItems, memory };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+ipcMain.handle('memory-initiatives', async () => {
+  try { return { ok: true, text: await llm.proposeInitiatives(llmContext()) }; }
+  catch (err) { return { ok: false, error: String(err && err.message || err) }; }
+});
+
+ipcMain.handle('memory-set-item', (_e, id, done) => {
+  memory = meetingMemory.setItemDone(memory, String(id || ''), !!done);
+  saveMemoryToDisk();
+  return memory;
+});
+ipcMain.handle('memory-remove-item', (_e, id) => {
+  memory = meetingMemory.removeItem(memory, String(id || ''));
+  saveMemoryToDisk();
+  return memory;
+});
+ipcMain.handle('memory-remove-meeting', (_e, id) => {
+  memory = meetingMemory.removeMeeting(memory, String(id || ''));
+  saveMemoryToDisk();
+  return memory;
+});
+
 ipcMain.handle('get-context', () => context);
 ipcMain.handle('save-context', (_e, data) => {
   context = {
+    mode: context.mode,
+    meetingContext: llm.normalizeMeetingContext(data && data.meetingContext),
     cv: String(data && data.cv || ''),
     jd: String(data && data.jd || ''),
     responseChars: llm.normalizeResponseChars(data && data.responseChars),

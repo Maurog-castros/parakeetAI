@@ -24,6 +24,29 @@ test('log includes transcript and suggested answers', () => {
   assert.match(md, /• Lideré un equipo/);
 });
 
+test('log includes the translation of interviewer phrases (Chinese mode)', () => {
+  const md = buildTranscriptLog({
+    transcript: [
+      { who: 'them', text: '请介绍一下你自己', translation: 'Preséntate, por favor.', time: '2026-11-19T15:00:05' },
+      { who: 'me', text: 'Claro.', translation: '', time: '2026-11-19T15:00:09' },
+    ],
+  });
+  assert.match(md, /\*\*\[15:00:05\] Entrevistador:\*\* 请介绍一下你自己\n\n> \*\*Traducción:\*\* Preséntate, por favor\./);
+  assert.equal((md.match(/Traducción:/g) || []).length, 1);
+});
+
 test('file name is sortable timestamp', () => {
   assert.equal(logFileName('2026-11-19T09:05:03'), '2026-11-19_09-05-03.md');
+});
+
+test('meeting log uses neutral labels and includes the summary', () => {
+  const md = buildTranscriptLog({
+    mode: 'meeting',
+    summary: '## Resumen de la conversación\n\nTodo bien.',
+    transcript: [{ who: 'them', text: 'Hagamos el viaje.', time: '2026-11-19T15:00:05' }],
+    answers: [{ who: 'them', question: 'Hagamos el viaje.', text: '💡 Idea: viaje', time: '2026-11-19T15:00:08' }],
+  });
+  assert.match(md, /^# Reunión /);
+  assert.match(md, /\*\*\[15:00:05\] Otros:\*\* Hagamos el viaje\./);
+  assert.match(md, /## Resumen de la conversación[\s\S]*## Transcripción[\s\S]*## Notas en vivo/);
 });

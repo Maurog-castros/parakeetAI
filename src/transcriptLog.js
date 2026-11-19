@@ -1,8 +1,10 @@
 'use strict';
-// Builds a Markdown log of one interview session (transcript + suggested
-// answers) so it can be reviewed later to analyse performance.
+// Builds a Markdown log of one session (transcript + suggested answers or
+// live notes, plus the meeting summary when there is one) so it can be
+// reviewed later.
 
 const WHO_LABEL = { them: 'Entrevistador', me: 'Yo' };
+const MEETING_WHO_LABEL = { them: 'Otros', me: 'Yo' };
 const MODE_LABEL = { auto: 'auto', manual: 'manual', mine: 'mi pregunta' };
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -17,10 +19,18 @@ function logFileName(date) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}.md`;
 }
 
-// session: { startedAt, endedAt, transcript: [{who, text, time}], answers: [{who, question, text, mode, time}] }
+// session: { mode, startedAt, endedAt, transcript: [{who, text, time}], answers: [{who, question, text, mode, time}], summary }
 function buildTranscriptLog(session) {
+  const meeting = session && session.mode === 'meeting';
+  const who = meeting ? MEETING_WHO_LABEL : WHO_LABEL;
+  const summary = String(session && session.summary || '').trim();
   const transcript = (Array.isArray(session && session.transcript) ? session.transcript : [])
-    .map((t) => ({ who: t.who === 'me' ? 'me' : 'them', text: String(t.text || '').trim(), time: toDate(t.time) }))
+    .map((t) => ({
+      who: t.who === 'me' ? 'me' : 'them',
+      text: String(t.text || '').trim(),
+      translation: String(t.translation || '').trim(), // Chinese mode: Spanish translation
+      time: toDate(t.time),
+    }))
     .filter((t) => t.text);
   const answers = (Array.isArray(session && session.answers) ? session.answers : [])
     .map((a) => ({
@@ -31,7 +41,7 @@ function buildTranscriptLog(session) {
       time: toDate(a.time),
     }))
     .filter((a) => a.text);
-  if (!transcript.length && !answers.length) return '';
+  if (!transcript.length && !answers.length && !summary) return '';
 
   const times = [...transcript, ...answers].map((x) => x.time).filter(Boolean).sort((a, b) => a - b);
   const start = toDate(session && session.startedAt) || times[0] || new Date();
@@ -39,21 +49,24 @@ function buildTranscriptLog(session) {
   const fmtDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hms(d)}`;
 
   const lines = [
-    `# Entrevista ${fmtDate(start)}`,
+    `# ${meeting ? 'Reunión' : 'Entrevista'} ${fmtDate(start)}`,
     '',
     `- Inicio: ${fmtDate(start)}`,
     `- Fin: ${fmtDate(end)}`,
-    `- Intervenciones: ${transcript.length} (entrevistador ${transcript.filter((t) => t.who === 'them').length}, yo ${transcript.filter((t) => t.who === 'me').length})`,
-    `- Respuestas sugeridas: ${answers.length}`,
-    '',
-    '## Transcripción',
+    `- Intervenciones: ${transcript.length} (${meeting ? 'otros' : 'entrevistador'} ${transcript.filter((t) => t.who === 'them').length}, yo ${transcript.filter((t) => t.who === 'me').length})`,
+    `- ${meeting ? 'Notas en vivo' : 'Respuestas sugeridas'}: ${answers.length}`,
     '',
   ];
+  if (summary) lines.push(summary, '');
+  lines.push('## Transcripción', '');
   if (!transcript.length) lines.push('_Sin transcripción._', '');
-  for (const t of transcript) lines.push(`**[${hms(t.time)}] ${WHO_LABEL[t.who]}:** ${t.text}`, '');
+  for (const t of transcript) {
+    lines.push(`**[${hms(t.time)}] ${who[t.who]}:** ${t.text}`, '');
+    if (t.translation) lines.push(`> **Traducción:** ${t.translation}`, '');
+  }
 
-  lines.push('## Respuestas sugeridas', '');
-  if (!answers.length) lines.push('_Sin respuestas sugeridas._', '');
+  lines.push(meeting ? '## Notas en vivo' : '## Respuestas sugeridas', '');
+  if (!answers.length) lines.push(meeting ? '_Sin notas._' : '_Sin respuestas sugeridas._', '');
   answers.forEach((a, i) => {
     lines.push(`### ${i + 1}. [${hms(a.time)}] (${a.mode})`, '');
     if (a.question) lines.push(`> ${a.question.replace(/\n+/g, ' ')}`, '');

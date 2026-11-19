@@ -21,7 +21,7 @@
              background:rgba(0,0,0,0.28); border-bottom:1px solid var(--line); user-select:none; flex:none; }
   #toolbar .spacer { flex:1; min-width:12px; }
   /* Electron drag regions swallow clicks even under overlays: opt every overlay out. */
-  #toolbar button, #strip button, #panes, #ctxPanel, #ctxPanel *, dialog button, dialog input, dialog summary { -webkit-app-region: no-drag; }
+  #toolbar button, #toolbar select, #strip button, #panes, #ctxPanel, #ctxPanel *, #memPanel, #memPanel *, dialog button, dialog input, dialog summary { -webkit-app-region: no-drag; }
   .group { display:flex; gap:2px; padding:2px; border:1px solid var(--line); border-radius:9px; background:rgba(255,255,255,.03); }
   button.src { position:relative; width:34px; height:30px; padding:0; font-size:15px; background:transparent; border-color:transparent; color:var(--mut); }
   button.src:hover { color:var(--fg); background:rgba(255,255,255,.08); border-color:transparent; }
@@ -98,6 +98,22 @@
   .msg.me { align-self:flex-end; text-align:right; }
   .msg.me .txt { color:#c9cfdc; }
   .msg.interim .txt { opacity:.6; font-style:italic; }
+  /* interviewer language + bilingual (Chinese → Spanish) columns */
+  .lang-select { font:inherit; font-size:12px; color:var(--fg); background:var(--card); border:1px solid var(--line);
+                 border-radius:7px; padding:3px 6px; cursor:pointer; max-width:100%; }
+  .lang-select:hover { border-color:var(--line-strong); }
+  .lang-select option { background:#1b1f29; color:var(--fg); }
+  #panes.bilingual { grid-template-columns:minmax(320px, 58%) 1fr; }
+  .tx-cols { display:none; }
+  #panes.bilingual .tx-cols { display:grid; grid-template-columns:1fr 1fr; column-gap:14px; padding:5px 10px;
+                               font-size:10.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+                               color:var(--dim); border-bottom:1px solid var(--line); flex:none; }
+  #panes.bilingual .tx-cols span:last-child { color:var(--acc); }
+  .msg.bi { display:grid; grid-template-columns:1fr 1fr; column-gap:14px; row-gap:3px; width:100%; max-width:100%; }
+  .msg.bi .who { grid-column:1 / -1; }
+  .msg.bi .tr { font-size:13px; line-height:1.45; color:var(--fg); padding-left:12px; border-left:2px solid rgba(110,168,254,.45); }
+  .msg.bi .tr.pending { color:var(--mut); }
+  .msg.bi .txt { font-weight:500; color:var(--mut); }
   .msg .q { color:var(--ok); }
   .msg .q::after { content:" ●"; }
 
@@ -124,6 +140,8 @@
   #ansPane.mine .ans-title::before { content:"TU PREGUNTA"; display:block; margin-bottom:3px; font-size:10px; font-weight:700;
     letter-spacing:.09em; color:var(--mine); }
   #ansPane.mine .ans-content li::marker { color:var(--mine); }
+  #app.meeting #ansPane.mine .ans-title::before { content:"LO QUE DIJISTE"; }
+  #app.meeting .ans-title:not(:empty)::before { content:"LO QUE SE DIJO"; display:block; margin-bottom:3px; font-size:10px; font-weight:700; letter-spacing:.09em; color:var(--mut); }
   #ansPane.mine #ansMeta { color:var(--mine); }
   .msg.me .q { color:var(--mine); }
   ::-webkit-scrollbar { width:8px; height:8px; }
@@ -166,6 +184,44 @@
   #ctxInfo { font-size:11px; color:var(--mut); }
   #ctxInfo.ok { color:var(--ok); }
   #ctxInfo.err { color:var(--err); }
+
+  /* --- mode: interview vs meeting --- */
+  .mode-select { font:inherit; font-size:12px; font-weight:600; color:var(--fg); background:rgba(255,255,255,.05);
+    border:1px solid var(--line); border-radius:8px; padding:4px 6px; cursor:pointer; }
+  .mode-select:hover { border-color:var(--line-strong); }
+  .mode-select option { background:#1b1f29; color:var(--fg); }
+  #app.meeting .interview-only, #app:not(.meeting) .meeting-only { display:none !important; }
+  #ctxPanel #meetingContext { min-height:120px; }
+
+  /* --- memory panel (overlay, meeting mode) --- */
+  #memPanel { position:absolute; inset:0; z-index:10; background:rgba(12,14,19,0.98); flex-direction:column; }
+  #memPanel[hidden] { display:none; }
+  #memPanel:not([hidden]) { display:flex; }
+  .mem-body { flex:1; min-height:0; overflow:auto; padding:12px 14px; display:flex; flex-direction:column; gap:14px; }
+  .mem-section h3 { margin:0 0 6px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--mut); }
+  .mem-result { border:1px solid rgba(110,168,254,.35); background:rgba(110,168,254,.07); border-radius:10px; padding:10px 12px; font-size:12.5px; line-height:1.5; }
+  .mem-result[hidden] { display:none; }
+  .mem-result h4 { margin:10px 0 4px; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--acc); }
+  .mem-result h4:first-child { margin-top:0; }
+  .mem-result p { margin:0 0 6px; }
+  .mem-result ul { margin:0; padding-left:18px; }
+  .mem-result .mem-title { font-size:14px; font-weight:700; margin-bottom:4px; }
+  .mem-result.err { border-color:rgba(255,128,128,.4); background:rgba(255,128,128,.07); color:var(--err); }
+  .mem-items { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
+  .mem-items li { display:flex; align-items:flex-start; gap:8px; padding:6px 8px; border:1px solid var(--line); border-radius:8px; font-size:12.5px; }
+  .mem-items li input { margin:2px 0 0; accent-color:var(--ok); width:15px; height:15px; flex:none; cursor:pointer; }
+  .mem-items li .mem-text { flex:1; }
+  .mem-items li .mem-sub { display:block; color:var(--mut); font-size:11px; }
+  .mem-items li.done .mem-text { color:var(--mut); text-decoration:line-through; }
+  .mem-items li button { padding:0 6px; height:20px; font-size:11px; background:transparent; border-color:transparent; color:var(--dim); }
+  .mem-items li button:hover { color:var(--err); background:transparent; }
+  .mem-empty { color:var(--mut); font-size:12px; }
+  .mem-meeting { border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:12.5px; }
+  .mem-meeting summary { cursor:pointer; font-weight:600; }
+  .mem-meeting summary .muted { font-weight:400; margin-left:6px; }
+  .mem-meeting .mem-result { margin-top:8px; border-color:var(--line); background:transparent; }
+  .mem-meeting .mem-del { margin-top:6px; }
+  details.mem-done-wrap summary { cursor:pointer; color:var(--mut); font-size:12px; }
 
   /* --- practice: replaces the main view and fills the whole window --- */
   #app.practice-mode > :not(dialog) { display:none !important; }
@@ -236,18 +292,24 @@
 <body>
   <div id="app" class="compact">
     <div id="toolbar">
+      <select id="modeSel" class="mode-select" title="Modo del asistente" aria-label="Modo del asistente">
+        <option value="interview">💼 Entrevista</option>
+        <option value="meeting">👥 Reunión</option>
+      </select>
       <div class="group" role="group" aria-label="Fuentes de audio">
         <button id="sysBtn" class="src" title="Escuchar al entrevistador (audio del sistema)" aria-label="Audio del sistema" aria-pressed="false">🖥<span class="src-dot"></span></button>
         <button id="micBtn" class="src" title="Transcribir tu micrófono" aria-label="Micrófono" aria-pressed="false">🎙<span class="src-dot"></span></button>
       </div>
-      <button id="answerBtn" class="tb" title="Pedir respuesta ahora (Ctrl+Shift+Enter)">Responder <kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>↵</kbd></button>
+      <button id="answerBtn" class="tb interview-only" title="Pedir respuesta ahora (Ctrl+Shift+Enter)">Responder <kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>↵</kbd></button>
+      <button id="summarizeBtn" class="tb meeting-only" title="Resumir la conversación: ideas, pendientes y próximos pasos (se guarda en la memoria)">📝 Resumir</button>
+      <button id="memBtn" class="tb meeting-only" title="Memoria: pendientes y conversaciones anteriores">🧠 Memoria</button>
       <span class="spacer"></span>
       <span class="move" title="Arrastra para mover" aria-hidden="true">✥</span>
       <button id="layoutBtn" class="icon" title="Expandir" aria-label="Expandir">⤢</button>
       <span id="timer" class="timer" title="Duración de la sesión">⏱ 00:00</span>
       <span class="sep" aria-hidden="true"></span>
       <button id="settings" class="icon" title="Configuración (CV, cargo, formato)" aria-label="Configuración">⚙</button>
-      <button id="practiceOpen" class="icon" title="Práctica de entrevista" aria-label="Práctica de entrevista">🎤</button>
+      <button id="practiceOpen" class="icon interview-only" title="Práctica de entrevista" aria-label="Práctica de entrevista">🎤</button>
       <button id="captureToggle" class="icon capture-toggle" title="Oculto en capturas de pantalla. Clic para mostrarlo" aria-label="Mostrar en capturas de pantalla" aria-pressed="false">📷</button>
       <button id="clickthru" class="icon" title="Paso del ratón: los clics atraviesan la ventana (Ctrl+Shift+M)" aria-label="Paso del ratón" aria-pressed="false">🖱</button>
       <button id="minimize" class="icon" title="Ocultar (Ctrl+Shift+Space para volver)" aria-label="Ocultar">—</button>
@@ -262,7 +324,14 @@
     </div>
     <main id="panes">
       <section class="pane" aria-label="Transcripción">
-        <div class="pane-head"><span class="lang">🌐 Español</span><span class="spacer"></span></div>
+        <div class="pane-head">
+          <select id="themLang" class="lang-select" title="Idioma del entrevistador" aria-label="Idioma del entrevistador">
+            <option value="auto">🌐 Auto (español, inglés, europeos)</option>
+            <option value="zh">中文 Chino → Español</option>
+          </select>
+          <span class="spacer"></span>
+        </div>
+        <div class="tx-cols" aria-hidden="true"><span>中文 · original</span><span>Español · traducción</span></div>
         <div id="txList" class="tx-list"><div class="tx-empty">Pulsa 🖥 para escuchar al entrevistador y 🎙 para tu voz.</div></div>
       </section>
       <section id="ansPane" class="pane" aria-label="Respuesta sugerida">
@@ -288,15 +357,21 @@
 
     <div id="ctxPanel" role="dialog" aria-modal="true" aria-labelledby="ctxTitle" hidden>
       <div class="ctx-head">
-        <strong id="ctxTitle">Configuración de la entrevista</strong>
+        <strong id="ctxTitle">Configuración</strong>
         <button id="ctxClose" class="icon close" type="button" title="Cerrar sin guardar (Esc)" aria-label="Cerrar configuración">✕</button>
       </div>
       <div class="ctx-card">
-        <section class="ctx-section">
+        <section class="ctx-section meeting-only">
+          <label class="field" for="meetingContext">Contexto de las conversaciones <span class="hint-text">(opcional)</span></label>
+          <textarea id="meetingContext" maxlength="4000"
+            placeholder="Ej.: reunión semanal del equipo de producto (Ana, Luis y yo) / grupo de amigos planeando un viaje…"></textarea>
+          <span class="hint-text">Ayuda a entender quién participa y de qué se trata. Los pendientes y resúmenes anteriores se recuerdan solos (🧠 Memoria).</span>
+        </section>
+        <section class="ctx-section interview-only">
           <label class="field" for="jd">Descripción del cargo</label>
           <textarea id="jd" placeholder="Pega aquí las funciones y requisitos del puesto…"></textarea>
         </section>
-        <section class="ctx-section">
+        <section class="ctx-section interview-only">
           <div class="ctx-row">
             <label class="field" for="cv">Tu CV</label>
             <span class="spacer"></span>
@@ -305,7 +380,7 @@
           </div>
           <textarea id="cv" placeholder="Pega tu CV o cárgalo desde un archivo .txt, .md o .pdf…"></textarea>
         </section>
-        <section class="ctx-section">
+        <section class="ctx-section interview-only">
           <div class="ctx-row">
             <label class="field" for="responseChars">Largo máximo de la respuesta</label>
             <input id="responseChars" name="responseChars" type="number" min="120" max="1500" step="20"
@@ -344,6 +419,34 @@
         <span class="spacer"></span>
         <button id="ctxCancel" type="button">Cancelar</button>
         <button id="ctxSave" class="primary" type="button">Guardar</button>
+      </div>
+    </div>
+
+    <div id="memPanel" role="dialog" aria-modal="true" aria-labelledby="memTitle" hidden>
+      <div class="ctx-head">
+        <strong id="memTitle">🧠 Memoria de conversaciones</strong>
+        <button id="memClose" class="icon close" type="button" title="Cerrar (Esc)" aria-label="Cerrar memoria">✕</button>
+      </div>
+      <div class="mem-body">
+        <div id="memResult" class="mem-result" role="status" aria-live="polite" hidden></div>
+        <section class="mem-section">
+          <h3>Pendientes abiertos</h3>
+          <ul id="memOpen" class="mem-items"></ul>
+          <details class="mem-done-wrap">
+            <summary id="memDoneLabel">Completados</summary>
+            <ul id="memDone" class="mem-items"></ul>
+          </details>
+        </section>
+        <section class="mem-section">
+          <h3>Conversaciones anteriores</h3>
+          <div id="memMeetings"></div>
+        </section>
+      </div>
+      <div class="ctx-foot">
+        <span id="memInfo" class="muted"></span>
+        <span class="spacer"></span>
+        <button id="memPlan" type="button" title="Propone próximos pasos e iniciativas a partir de la memoria">💡 Proponer próximos pasos</button>
+        <button id="memSummarize" class="primary" type="button">📝 Resumir conversación actual</button>
       </div>
     </div>
 

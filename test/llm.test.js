@@ -93,3 +93,15 @@ test('si el gateway ignora stream, usa la respuesta JSON', async () => {
     { headers: { 'content-type': 'application/json' } });
   assert.equal(await readCompletion(r, null), 'Respuesta');
 });
+
+test('modo reunión: instrucciones de notas en vivo y memoria en el contexto', () => {
+  const { buildInstructions, buildContextBlock, gatewayConfigure, transcriptText, buildMeetingSummaryPrompt } = require('../src/llm');
+  const ctx = { mode: 'meeting', meetingContext: 'Equipo de producto', memoryContext: '=== PENDIENTES ===\n- [p1] Cotizar' };
+  assert.match(buildInstructions(ctx), /💡 Idea:/);
+  assert.doesNotMatch(buildInstructions(ctx), /ENTREVISTADOR/);
+  assert.match(buildContextBlock(ctx), /Equipo de producto[\s\S]*\[p1\] Cotizar/);
+  assert.equal(gatewayConfigure(ctx).max_tokens, 120);
+  assert.match(buildInstructions({ mode: 'otro' }), /ENTREVISTADOR/);
+  assert.equal(transcriptText([{ who: 'me', text: 'hola' }, { who: 'them', text: '你好', translation: 'hola' }, { who: 'them', text: ' ' }]), 'Yo: hola\nOtros: hola');
+  assert.match(buildMeetingSummaryPrompt(ctx), /"resolvedItemIds"/);
+});

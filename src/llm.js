@@ -8,6 +8,17 @@ const MIN_RESPONSE_CHARS = 120;
 const MAX_RESPONSE_CHARS = 1500;
 const DEFAULT_RESPONSE_FORMAT = 'bullets';
 const MAX_RESPONSE_INSTRUCTIONS = 4000;
+const MAX_MEETING_CONTEXT = 4000;
+
+// 'interview' (job interview copilot) | 'meeting' (any conversation: work
+// meetings, friends; live notes + summary + memory of previous talks).
+function normalizeMode(value) {
+  return value === 'meeting' ? 'meeting' : 'interview';
+}
+
+function normalizeMeetingContext(value) {
+  return String(value || '').trim().slice(0, MAX_MEETING_CONTEXT);
+}
 
 function normalizeResponseChars(value) {
   const parsed = Number.parseInt(value, 10);
@@ -75,6 +86,7 @@ async function probe() {
 // role 'candidate': the user's own questions (microphone) get a quick,
 // factual explanation to lean on.
 function buildInstructions(context, role) {
+  if (normalizeMode(context && context.mode) === 'meeting') return buildMeetingInstructions(context);
   const candidate = role === 'candidate';
   const hasCv = !!String(context && context.cv || '').trim();
   const responseChars = normalizeResponseChars(context && context.responseChars);
@@ -129,7 +141,46 @@ function buildInstructions(context, role) {
   ].filter((line) => line !== null).join('\n');
 }
 
+// Meeting mode, live: the gateway sees each phrase and either notes something
+// worth remembering (idea, commitment, decision, follow-up of an old pending
+// item) or stays silent with "—".
+function buildMeetingInstructions(context) {
+  const responseInstructions = normalizeResponseInstructions(context && context.responseInstructions);
+  return [
+    'Eres un asistente discreto que acompaña una conversación en vivo (reunión de trabajo, llamada o charla entre amigos).',
+    'Recibes la transcripción automática de lo que se va diciendo; puede traer errores de reconocimiento.',
+    '',
+    'TAREA: cuando la última intervención contenga algo que valga la pena anotar, escribe UNA nota muy breve (máximo 160 caracteres).',
+    'Empieza la nota con una etiqueta:',
+    '- "💡 Idea:" una propuesta, ocurrencia o posibilidad nueva.',
+    '- "✅ Pendiente:" alguien se compromete a hacer algo (indica quién si se sabe).',
+    '- "📌 Decisión:" se acuerda o define algo.',
+    '- "🔁 Retoma:" se menciona un PENDIENTE ABIERTO de conversaciones anteriores (cítalo y di si avanzó).',
+    '- "❓ Pregunta:" una duda abierta que nadie respondió y conviene aclarar.',
+    'Reglas:',
+    '- Una sola nota, en español, concreta y fiel a lo dicho. Sin relleno ni opiniones.',
+    '- No inventes nombres, fechas ni cifras que no se hayan dicho.',
+    '- No repitas una nota que ya hiciste antes.',
+    responseInstructions ? '' : null,
+    responseInstructions ? '=== INSTRUCCIONES PERSONALES ===' : null,
+    responseInstructions || null,
+    'Si la intervención es charla trivial o no aporta nada que anotar, responde EXACTAMENTE con "—".',
+  ].filter((line) => line !== null).join('\n');
+}
+
+function buildMeetingContextBlock(context) {
+  const about = normalizeMeetingContext(context && context.meetingContext);
+  const memory = String(context && context.memoryContext || '').slice(0, 6000);
+  return [
+    '=== CONTEXTO DE LA CONVERSACIÓN ===',
+    about || '(no proporcionado)',
+    '',
+    memory || '=== MEMORIA ===\n(sin conversaciones anteriores)',
+  ].join('\n');
+}
+
 function buildContextBlock(context) {
+  if (normalizeMode(context && context.mode) === 'meeting') return buildMeetingContextBlock(context);
   const cv = (context && context.cv || '').slice(0, 6000);
   const jd = (context && context.jd || '').slice(0, 3000);
   return [
@@ -145,6 +196,10 @@ function buildSystem(context) {
   return buildInstructions(context) + '\n\n' + buildContextBlock(context);
 }
 
+function suggestMaxTokensFor(context) {
+  return normalizeMode(context && context.mode) === 'meeting' ? 120 : suggestMaxTokens(context && context.responseChars);
+}
+
 function suggestMaxTokens(responseChars) {
   return Math.min(800, Math.max(96, Math.ceil(normalizeResponseChars(responseChars) / 2)));
 }
@@ -155,7 +210,7 @@ function gatewayConfigure(context, resetHistory, role) {
     type: 'Configure',
     instructions: buildInstructions(context, role),
     context: buildContextBlock(context),
-    max_tokens: suggestMaxTokens(context && context.responseChars),
+    max_tokens: suggestMaxTokensFor(context),
   };
   if (resetHistory) msg.reset_history = true;
   return msg;
@@ -205,15 +260,16 @@ async function readCompletion(r, onDelta) {
 async function suggest(transcript, context, onDelta, signal) {
   const c = cfg();
   if (!c.hasKey) throw new Error('token missing');
-  const responseChars = normalizeResponseChars(context && context.responseChars);
+  const meeting = normalizeMode(context && context.mode) === 'meeting';
+  const responseChars = meeting ? 300 : normalizeResponseChars(context && context.responseChars);
   const body = {
     model: c.chatModel,
     messages: [
       { role: 'system', content: buildSystem(context) },
-      { role: 'user', content: 'ENTREVISTADOR (reciente):\n' + transcript },
+      { role: 'user', content: (meeting ? 'CONVERSACIÓN (reciente):\n' : 'ENTREVISTADOR (reciente):\n') + transcript },
     ],
     temperature: 0.3,
-    max_tokens: suggestMaxTokens(responseChars),
+    max_tokens: suggestMaxTokensFor(context),
     stream: !!onDelta,
   };
   const r = await fetch(`${c.baseUrl}/chat/completions`, {
@@ -245,6 +301,28 @@ async function chat(messages, options) {
   if (!r.ok) throw new Error(`chat -> ${r.status}: ${(await r.text()).slice(0, 200)}`);
   const j = await r.json();
   return String(j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content || '').trim();
+}
+
+// Live translation of the interviewer's transcript (e.g. Chinese → Spanish).
+const TRANSLATE_FROM = { zh: 'chino (mandarín)' };
+function buildTranslatePrompt(from) {
+  return [
+    'Eres un intérprete simultáneo en una entrevista de trabajo.',
+    `El usuario te envía la transcripción automática de lo que dice el entrevistador en ${TRANSLATE_FROM[from] || from}.`,
+    'Puede mezclar palabras en inglés u otros idiomas y traer errores de reconocimiento o frases cortadas.',
+    'Tradúcela al español neutro, natural y fiel al sentido. Conserva nombres propios, siglas y términos técnicos.',
+    'Responde SOLO con la traducción: sin comillas, notas, alternativas ni explicaciones.',
+  ].join('\n');
+}
+
+async function translate(text, from) {
+  const src = String(text || '').trim().slice(0, 2000);
+  if (!src) return '';
+  const out = await chat([
+    { role: 'system', content: buildTranslatePrompt(from || 'zh') },
+    { role: 'user', content: src },
+  ], { temperature: 0.1, maxTokens: 600 });
+  return stripThinking(out).trim();
 }
 
 function practiceContext(context) {
@@ -312,7 +390,110 @@ async function evaluatePractice(history, context) {
   ], { temperature: 0.25, maxTokens: 1100 });
 }
 
+// --- meeting mode: summary + memory ---
+const SUMMARY_TRANSCRIPT_CHARS = 24000;
+
+// transcript: [{who, text, translation}] -> "Yo: …" / "Otros: …" lines; keeps
+// the end of very long conversations (most recent context matters most).
+function transcriptText(transcript) {
+  const lines = (Array.isArray(transcript) ? transcript : [])
+    .map((t) => {
+      const text = String(t && (t.translation || t.text) || '').trim();
+      return text ? `${t.who === 'me' ? 'Yo' : 'Otros'}: ${text}` : '';
+    })
+    .filter(Boolean);
+  let out = lines.join('\n');
+  if (out.length > SUMMARY_TRANSCRIPT_CHARS) out = '[…]\n' + out.slice(-SUMMARY_TRANSCRIPT_CHARS);
+  return out;
+}
+
+function buildMeetingSummaryPrompt(context) {
+  const about = normalizeMeetingContext(context && context.meetingContext);
+  const memory = String(context && context.memoryContext || '').slice(0, 8000);
+  return [
+    'Eres un asistente que resume conversaciones (reuniones de trabajo, llamadas o charlas entre amigos) y lleva la memoria de los pendientes.',
+    'Recibirás la transcripción automática de la conversación ("Yo" es el usuario; "Otros" son los demás participantes). Puede traer errores de reconocimiento: interprétalos con sentido común.',
+    'También recibes la MEMORIA: pendientes abiertos de conversaciones anteriores (con id entre corchetes) y resúmenes previos.',
+    '',
+    'Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin bloques de código ni texto adicional) con esta forma:',
+    '{',
+    '  "title": "título breve de la conversación (máx. 8 palabras)",',
+    '  "summary": "resumen de 3 a 6 frases: de qué se habló y a qué se llegó",',
+    '  "topics": ["temas principales"],',
+    '  "ideas": ["ideas o propuestas que surgieron, aunque no se hayan decidido"],',
+    '  "decisions": ["acuerdos o definiciones explícitas"],',
+    '  "actionItems": [{"text": "tarea concreta y verificable", "owner": "quién la hace, o vacío si no se dijo"}],',
+    '  "resolvedItemIds": ["ids de PENDIENTES ABIERTOS que en esta conversación se dieron por hechos o descartados"],',
+    '  "nextSteps": ["próximos pasos recomendados, priorizados, en base a esta conversación y a las anteriores"],',
+    '  "initiatives": ["próximas iniciativas o temas que valdría la pena proponer, conectando ideas de esta y de conversaciones previas"]',
+    '}',
+    'Reglas:',
+    '- Español neutro. Cada elemento de lista es una frase corta.',
+    '- Sé fiel a lo dicho: no inventes nombres, fechas, cifras ni compromisos.',
+    '- actionItems: solo compromisos reales de esta conversación; no repitas pendientes abiertos que ya existen.',
+    '- resolvedItemIds: solo ids que aparecen en la memoria y cuyo cierre se mencionó claramente.',
+    '- nextSteps: incluye pendientes anteriores que sigan abiertos y sean relevantes.',
+    '- Si la conversación es casual (amigos), igual rescata ideas, planes y compromisos; las listas pueden quedar vacías.',
+    '',
+    '=== CONTEXTO DE LA CONVERSACIÓN ===',
+    about || '(no proporcionado)',
+    '',
+    memory || '=== MEMORIA ===\n(sin conversaciones anteriores)',
+  ].join('\n');
+}
+
+async function summarizeMeeting(transcript, context) {
+  const text = transcriptText(transcript);
+  if (!text) throw new Error('no hay conversación para resumir');
+  const out = await chat([
+    { role: 'system', content: buildMeetingSummaryPrompt(context) },
+    { role: 'user', content: 'TRANSCRIPCIÓN:\n' + text },
+  ], { temperature: 0.2, maxTokens: 1600 });
+  return stripThinking(out);
+}
+
+// Ideas for what to do next, from the memory alone (no live conversation).
+function buildInitiativesPrompt(context) {
+  const about = normalizeMeetingContext(context && context.meetingContext);
+  const memory = String(context && context.memoryContext || '').slice(0, 10000);
+  return [
+    'Eres un asistente que ayuda a dar continuidad a conversaciones recurrentes (equipo de trabajo, proyectos o amigos).',
+    'A partir de la MEMORIA (pendientes abiertos y resúmenes de conversaciones anteriores), propone cómo seguir.',
+    'Responde en español con este formato exacto, viñetas que empiezan con "• ":',
+    'PENDIENTES PRIORITARIOS',
+    '• 2 a 5 pendientes abiertos más importantes, con su responsable si se conoce',
+    'PRÓXIMOS PASOS',
+    '• 3 a 5 acciones concretas para la próxima conversación',
+    'INICIATIVAS PROPUESTAS',
+    '• 2 a 4 ideas nuevas que conecten temas o ideas que se repiten',
+    'PARA ABRIR LA PRÓXIMA CONVERSACIÓN',
+    '• 2 o 3 preguntas o temas para retomar',
+    'No inventes hechos que no estén en la memoria. Si la memoria está vacía, dilo en una línea.',
+    '',
+    '=== CONTEXTO ===',
+    about || '(no proporcionado)',
+    '',
+    memory || '(memoria vacía)',
+  ].join('\n');
+}
+
+async function proposeInitiatives(context) {
+  const out = await chat([
+    { role: 'system', content: buildInitiativesPrompt(context) },
+    { role: 'user', content: 'Propón cómo seguir.' },
+  ], { temperature: 0.5, maxTokens: 900 });
+  return stripThinking(out).trim();
+}
+
 module.exports = {
+  normalizeMode,
+  normalizeMeetingContext,
+  buildMeetingInstructions,
+  buildMeetingSummaryPrompt,
+  buildInitiativesPrompt,
+  transcriptText,
+  summarizeMeeting,
+  proposeInitiatives,
   cfg,
   probe,
   suggest,
@@ -330,4 +511,6 @@ module.exports = {
   buildPracticeEvaluationPrompt,
   practiceQuestion,
   evaluatePractice,
+  translate,
+  buildTranslatePrompt,
 };
