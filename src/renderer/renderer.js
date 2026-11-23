@@ -1002,6 +1002,7 @@ el('memPlan').onclick = proposeNextSteps;
 el('memFolders').onclick = () => openFolder('');
 
 // --- history panel: browse saved sessions (one folder per conversation) ---
+const TRANSCRIPT_TAB = 'transcripcion.md';
 const HIST_TABS = { 'resumen.md': 'Resumen', 'pendientes.md': 'Pendientes', 'ideas.md': 'Ideas', 'proximos-pasos.md': 'Próximos pasos', 'transcripcion.md': 'Transcripción' };
 let histSessions = [], histSelected = '', histCurrent = '', histDoc = null, histTab = '', histSearchTimer = null;
 
@@ -1100,6 +1101,24 @@ function renderHistTab() {
   mdRender(el('histContent'), histDoc.files[histTab] || '');
   el('histContent').scrollTop = 0;
 }
+// The suggested answers (or live notes) sit after the whole transcript in
+// transcripcion.md; show that section in its own tab, right after it.
+const HIST_ANSWERS_TAB = 'respuestas';
+function splitAnswersTab(r) {
+  const md = String(r.files[TRANSCRIPT_TAB] || '').replace(/\r\n/g, '\n');
+  const m = /^## (Respuestas sugeridas|Notas en vivo)[ \t]*$/m.exec(md);
+  if (!m) return r;
+  const rest = md.slice(m.index);
+  const next = rest.slice(m[0].length).search(/^## /m);
+  const section = next < 0 ? rest : rest.slice(0, m[0].length + next);
+  r.files[TRANSCRIPT_TAB] = md.slice(0, m.index) + rest.slice(section.length);
+  r.files[HIST_ANSWERS_TAB] = section;
+  HIST_TABS[HIST_ANSWERS_TAB] = m[1];
+  const files = r.info.files.filter((f) => f !== HIST_ANSWERS_TAB);
+  files.splice(files.indexOf(TRANSCRIPT_TAB) + 1, 0, HIST_ANSWERS_TAB);
+  r.info.files = files;
+  return r;
+}
 async function selectHistory(id) {
   histSelected = id;
   renderHistList();
@@ -1107,7 +1126,7 @@ async function selectHistory(id) {
   const r = await window.api.historyRead(id);
   if (histSelected !== id) return;
   if (!r || !r.ok) { setHistStatus(r && r.error || 'No se pudo abrir', true); return; }
-  histDoc = r;
+  histDoc = splitAnswersTab(r);
   const info = r.info;
   el('histEmpty').hidden = true;
   el('histView').hidden = false;
