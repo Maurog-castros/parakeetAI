@@ -36,6 +36,9 @@ contextBridge.exposeInMainWorld('api', {
   onShortcut: (cb) => ipcRenderer.on('shortcut', (_e, name) => cb(name)),
   minimize: () => ipcRenderer.send('minimize'),
   quit: () => ipcRenderer.send('quit'),
-  setCaptureVisible: (on) => ipcRenderer.invoke('set-capture-visible', on),
+  captureScreen: () => ipcRenderer.invoke('screenshot-capture'),
+  suggestScreenshot: (id, opts, reqId) => ipcRenderer.invoke('screenshot-suggest', id, opts, reqId),
+  onScreenshotDelta: (cb) => ipcRenderer.on('screenshot-delta', (_e, reqId, text) => cb(reqId, text)),
+  setCaptureVisible:(on) => ipcRenderer.invoke('set-capture-visible', on),
   onClickThroughChanged: (cb) => ipcRenderer.on('click-through-changed', (_e, on) => cb(!!on)),
 });

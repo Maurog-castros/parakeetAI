@@ -50,3 +50,13 @@ test('meeting log uses neutral labels and includes the summary', () => {
   assert.match(md, /\*\*\[15:00:05\] Otros:\*\* Hagamos el viaje\./);
   assert.match(md, /## Resumen de la conversación[\s\S]*## Transcripción[\s\S]*## Notas en vivo/);
 });
+
+test('log lists screenshots with relative image links', () => {
+  const md = buildTranscriptLog({
+    screenshots: [{ file: 'C:\\ses\\sion\\captura_15-00-05.jpg', prompt: 'ejercicio', time: '2026-11-19T15:00:05' }],
+    answers: [{ who: 'them', question: '📸 ejercicio', text: '```\ncode\n```', mode: 'screenshot', time: '2026-11-19T15:00:09' }],
+  });
+  assert.match(md, /## Capturas de pantalla/);
+  assert.match(md, /- \[15:00:05\] !\[captura\]\(captura_15-00-05\.jpg\) — ejercicio/);
+  assert.match(md, /\(captura\)/);
+});

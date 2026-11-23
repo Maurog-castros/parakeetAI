@@ -126,6 +126,17 @@
   .ans-content ul { margin:0; padding-left:1.2em; }
   .ans-content li { margin:0 0 .6em; }
   .ans-content li::marker { color:var(--acc); }
+  .ans-content pre { margin:0 0 .6em; padding:8px 10px; background:rgba(0,0,0,.35); border:1px solid var(--line); border-radius:8px;
+                     font:12.5px/1.45 ui-monospace, Consolas, monospace; white-space:pre; overflow:auto; user-select:text; }
+  /* screenshot attached to the conversation */
+  .msg.shot { align-self:center; max-width:100%; width:min(100%, 420px); padding:8px; gap:6px;
+              background:rgba(110,168,254,.07); border:1px solid rgba(110,168,254,.3); border-radius:10px; }
+  .msg.shot img { display:block; width:100%; max-height:180px; object-fit:contain; border-radius:6px; cursor:zoom-in; background:#000; }
+  .msg.shot.big img { max-height:none; cursor:zoom-out; }
+  .msg.shot .shot-row { display:flex; gap:6px; }
+  .msg.shot .shot-row input { flex:1; min-width:0; font:inherit; font-size:12px; color:var(--fg); background:var(--card);
+                              border:1px solid var(--line); border-radius:7px; padding:4px 8px; }
+  .msg.shot .shot-row button { flex:none; }
   .ans-content.empty { color:var(--dim); font-style:italic; font-size:12.5px; }
   #ansPane.generating .ans-title::after { content:" · escribiendo…"; color:var(--mut); font-weight:400; animation:blink 1.2s ease-in-out infinite; }
   @keyframes blink { 50% { opacity:.35; } }
@@ -358,6 +369,7 @@
       <button id="summarizeBtn" class="tb meeting-only" title="Resumir la conversación: ideas, pendientes y próximos pasos (se guarda en la memoria)">📝 Resumir</button>
       <button id="endMeetingBtn" class="tb end-meeting" title="Terminar la reunión: recoge las últimas frases, deja de escuchar, resume y guarda en la memoria">⏹ Terminar</button>
       <button id="memBtn" class="tb meeting-only" title="Memoria: pendientes y conversaciones anteriores">🧠 Memoria</button>
+      <button id="shotBtn" class="tb" title="Capturar la pantalla y adjuntarla a la conversación (Ctrl+Shift+X)">📸 Captura</button>
       <span class="spacer"></span>
       <span class="move" title="Arrastra para mover" aria-hidden="true">✥</span>
       <button id="layoutBtn" class="icon" title="Expandir" aria-label="Expandir">⤢</button>

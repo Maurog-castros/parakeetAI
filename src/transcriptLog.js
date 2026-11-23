@@ -5,7 +5,7 @@
 
 const WHO_LABEL = { them: 'Entrevistador', me: 'Yo' };
 const MEETING_WHO_LABEL = { them: 'Otros', me: 'Yo' };
-const MODE_LABEL = { auto: 'auto', manual: 'manual', mine: 'mi pregunta' };
+const MODE_LABEL = { auto: 'auto', manual: 'manual', mine: 'mi pregunta', screenshot: 'captura' };
 
 const pad = (n) => String(n).padStart(2, '0');
 const toDate = (v) => {
@@ -41,9 +41,12 @@ function buildTranscriptLog(session) {
       time: toDate(a.time),
     }))
     .filter((a) => a.text);
-  if (!transcript.length && !answers.length && !summary) return '';
+  const screenshots = (Array.isArray(session && session.screenshots) ? session.screenshots : [])
+    .map((s) => ({ file: String(s && s.file || '').split(/[\\/]/).pop(), prompt: String(s && s.prompt || '').trim(), time: toDate(s && s.time) }))
+    .filter((s) => s.file);
+  if (!transcript.length && !answers.length && !summary && !screenshots.length) return '';
 
-  const times = [...transcript, ...answers].map((x) => x.time).filter(Boolean).sort((a, b) => a - b);
+  const times = [...transcript, ...answers, ...screenshots].map((x) => x.time).filter(Boolean).sort((a, b) => a - b);
   const start = toDate(session && session.startedAt) || times[0] || new Date();
   const end = toDate(session && session.endedAt) || new Date();
   const fmtDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hms(d)}`;
@@ -72,6 +75,15 @@ function buildTranscriptLog(session) {
     if (a.question) lines.push(`> ${a.question.replace(/\n+/g, ' ')}`, '');
     lines.push(a.text, '');
   });
+
+  if (screenshots.length) {
+    lines.push('## Capturas de pantalla', '');
+    for (const s of screenshots) {
+      const note = s.prompt ? ' — ' + s.prompt.replace(/\n+/g, ' ') : '';
+      lines.push(`- [${hms(s.time)}] ![captura](${encodeURI(s.file)})${note}`);
+    }
+    lines.push('');
+  }
   return lines.join('\n');
 }
 

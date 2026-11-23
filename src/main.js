@@ -274,6 +274,7 @@ app.whenReady().then(() => {
   registerShortcut('CommandOrControl+Shift+Space', toggleVisible);
   registerShortcut('CommandOrControl+Shift+M', () => setClickThrough(!clickThrough));
   registerShortcut('CommandOrControl+Shift+Q', () => app.quit());
+  registerShortcut('CommandOrControl+Shift+X', () => { if (win) win.webContents.send('shortcut', 'screenshot'); });
   createTray();
 
   app.on('activate', () => {
@@ -421,6 +422,76 @@ ipcMain.handle('save-transcript-log', (_e, session) => {
     const dir = writeSessionLog();
     logSession = null; logDir = null; logDirty = false;
     return dir ? { ok: true, file: dir } : { ok: true, skipped: true };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+// --- screenshots: capture the screen and ask for an answer based on it ---
+// Captures the display the overlay is on. The overlay itself is left out
+// by content protection; when the user made it visible in captures it is
+// protected just for the grab. The image is kept here (by id) so the
+// renderer only sends the id back when asking for a suggestion, and saved
+// as a JPEG in the session folder.
+const SHOT_MAX_WIDTH = 1920;
+const SHOT_KEEP = 20;
+const shots = new Map(); // id -> { dataUrl, file, time }
+let shotSeq = 0;
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function captureScreen() {
+  const display = win ? screen.getDisplayMatching(win.getBounds()) : screen.getPrimaryDisplay();
+  const scale = display.scaleFactor || 1;
+  let width = Math.round(display.size.width * scale);
+  let height = Math.round(display.size.height * scale);
+  if (width > SHOT_MAX_WIDTH) { height = Math.round(height * SHOT_MAX_WIDTH / width); width = SHOT_MAX_WIDTH; }
+  const unprotect = win && context.shareInterfaceVisible;
+  if (unprotect) { try { win.setContentProtection(true); } catch (_) {} await delay(150); }
+  try {
+    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width, height } });
+    const source = sources.find((s) => String(s.display_id) === String(display.id)) || sources[0];
+    if (!source || source.thumbnail.isEmpty()) throw new Error('no se pudo capturar la pantalla (¿permiso de grabación de pantalla?)');
+    return source.thumbnail;
+  } finally {
+    if (unprotect) applyShareVisibility();
+  }
+}
+
+ipcMain.handle('screenshot-capture', async () => {
+  try {
+    const image = await captureScreen();
+    const jpeg = image.toJPEG(82);
+    const time = new Date();
+    const id = 'shot-' + (++shotSeq);
+    let file = '';
+    try {
+      const pad = (n) => String(n).padStart(2, '0');
+      const base = `captura_${pad(time.getHours())}-${pad(time.getMinutes())}-${pad(time.getSeconds())}`;
+      const dir = ensureLogDir();
+      file = path.join(dir, base + '.jpg');
+      for (let n = 2; fs.existsSync(file); n++) file = path.join(dir, `${base}_${n}.jpg`);
+      fs.writeFileSync(file, jpeg);
+    } catch (err) { console.log('[shot] save failed', err.message); file = ''; }
+    const dataUrl = 'data:image/jpeg;base64,' + jpeg.toString('base64');
+    shots.set(id, { dataUrl, file, time });
+    while (shots.size > SHOT_KEEP) shots.delete(shots.keys().next().value);
+    const size = image.getSize();
+    return { ok: true, id, dataUrl, file, width: size.width, height: size.height, time: time.toISOString() };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+// Streams the answer back with 'screenshot-delta' events; resolves with the full text.
+ipcMain.handle('screenshot-suggest', async (e, id, opts, reqId) => {
+  const shot = shots.get(String(id || ''));
+  if (!shot) return { ok: false, error: 'la captura ya no está disponible; toma otra' };
+  const key = String(reqId || id);
+  try {
+    const text = await llm.suggestFromScreenshot(shot.dataUrl, opts || {}, llmContext(), (partial) => {
+      if (!e.sender.isDestroyed()) e.sender.send('screenshot-delta', key, partial);
+    });
+    return { ok: true, text };
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
   }

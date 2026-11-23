@@ -118,3 +118,21 @@ test('modo reunión incorpora documentos limitados y los trata como referencia n
   assert.doesNotMatch(prompt, /<malicioso>/);
   assert.ok(normalizeMeetingDocuments([{ name: 'largo.txt', text: 'x'.repeat(20000) }])[0].text.length <= 12000);
 });
+
+test('captura: mensaje multimodal con imagen, pedido y conversación', () => {
+  const { buildScreenshotMessages } = require('../src/llm');
+  const msgs = buildScreenshotMessages('data:image/jpeg;base64,AAA', { prompt: 'resuelve el ejercicio', transcript: 'Entrevistador: comparte pantalla' }, { cv: 'Dev Node', jd: 'Backend' });
+  assert.equal(msgs.length, 2);
+  assert.match(msgs[0].content, /CAPTURA DE SU PANTALLA/);
+  assert.match(msgs[0].content, /Dev Node/);
+  const [text, image] = msgs[1].content;
+  assert.equal(text.type, 'text');
+  assert.match(text.text, /resuelve el ejercicio/);
+  assert.match(text.text, /comparte pantalla/);
+  assert.deepEqual(image, { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAA' } });
+});
+
+test('captura: modo reunión usa su propio prompt', () => {
+  const { buildScreenshotPrompt } = require('../src/llm');
+  assert.match(buildScreenshotPrompt({ mode: 'meeting' }), /reunión, llamada o chat/);
+});

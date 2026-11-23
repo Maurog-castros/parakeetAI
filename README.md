@@ -39,6 +39,7 @@ Tests: `npm test` (node:test, sin dependencias extra).
 | `IAMIKO_BASE_URL` | gateway de chat (def. `https://ia.iamiko.cl/vscode/v1`) |
 | `IAMIKO_TOKEN` | clave del gateway de chat (**obligatorio**) |
 | `CHAT_MODEL` | modelo de chat (def. `auto-vscode`; usa uno de los que lista `/models`) |
+| `VISION_MODEL` | opcional: modelo con visión para 📸 Captura (def. `CHAT_MODEL`) |
 | `STT_URL` | STT en vivo, WebSocket compatible con Deepgram (def. `wss://stt.iamiko.cl/v1/listen`) |
 | `STT_TOKEN` | clave de la puerta de voz (**obligatorio**) |
 | `STT_LANG` | idioma del STT (def. `es`) |
@@ -52,11 +53,18 @@ Tests: `npm test` (node:test, sin dependencias extra).
 | `Ctrl+Shift+Space` | mostrar / ocultar el asistente |
 | `Ctrl+Shift+M` | paso del ratón (los clics atraviesan la ventana) |
 | `Ctrl+Shift+Q` | salir |
+| `Ctrl+Shift+X` | capturar la pantalla y adjuntarla a la conversación |
 | `Ctrl+Shift+Enter` | pedir respuesta ahora (solo mientras se escucha el audio del sistema) |
 | `Ctrl+Shift+Backspace` | limpiar y empezar una sesión nueva (ídem) |
 | `Ctrl+←` / `Ctrl+→` | respuesta o nota anterior / siguiente |
 
 En macOS se usa `Cmd` en lugar de `Ctrl` (salvo `Ctrl+←/→`).
+
+## 📸 Captura de pantalla
+- **📸 Captura** (o `Ctrl+Shift+X`, en cualquier momento) toma un pantallazo de la pantalla donde está el asistente y lo adjunta a la conversación. El overlay no sale en la imagen.
+- En la captura adjunta, escribe opcionalmente qué necesitas (p. ej. *resuelve el ejercicio*) y pulsa **💡 Sugerir**: el asistente responde en base a la imagen, la conversación reciente y tu contexto (CV/cargo o contexto de la reunión). Los ejercicios de código vienen con la solución en un bloque.
+- La imagen se guarda como `captura_HH-MM-SS.jpg` en la carpeta de la sesión y queda enlazada en `transcripcion.md`.
+- Requiere un modelo con visión en el gateway (`VISION_MODEL`). En macOS pide el permiso de *Grabación de pantalla*.
 
 ## 💼 Modo entrevista
 - Pulsa **⚙ Configuración** y pega la **descripción del cargo** y tu **CV** (o cárgalo desde .txt, .md o .pdf). Ahí también defines el largo máximo de la respuesta (120–1500 caracteres), el formato (lista de puntos o texto continuo) e instrucciones personales. Se guarda en `userData/parakeet-context.json`.

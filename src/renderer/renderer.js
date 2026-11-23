@@ -10,7 +10,7 @@ const IS_MAC = window.api && window.api.platform === 'darwin';
 // macOS: global shortcuts are registered as CommandOrControl -> show Cmd (⌘).
 // Ctrl+←/→ (answer navigation) really is Ctrl on every platform, so skip those.
 if (IS_MAC) {
-  for (const id of ['answerBtn', 'clickthru', 'minimize', 'close', 'ctBanner', 'clear']) {
+  for (const id of ['answerBtn', 'shotBtn', 'clickthru', 'minimize', 'close', 'ctBanner', 'clear']) {
     const n = el(id);
     if (!n) continue;
     if (n.title) n.title = n.title.replace(/Ctrl\+Shift/g, 'Cmd+Shift');
@@ -268,11 +268,20 @@ function limitChars(text) {
   const sp = cut.lastIndexOf(' ');
   return (sp >= room * 0.65 ? cut.slice(0, sp) : cut).trimEnd() + '…';
 }
-// Paragraph lines -> <p>, "• "/"- " lines -> one <ul> per run of bullets.
+// Screenshot answers may carry code: they are not cut to the spoken-answer limit.
+const answerText = (a) => (a.mode === 'screenshot' ? String(a.text || '').trim() : limitChars(a.text));
+// Paragraph lines -> <p>, "• "/"- " lines -> one <ul> per run of bullets,
+// ``` fenced blocks -> <pre> (code from screenshot answers).
 function formatAnswer(target, text) {
   target.replaceChildren();
-  let ul = null;
-  for (const raw of String(text).split(/\n+/)) {
+  let ul = null, pre = null, code = [];
+  for (const raw of String(text).split('\n')) {
+    if (/^\s*```/.test(raw)) {
+      if (pre) { pre = null; code = []; }
+      else { pre = document.createElement('pre'); target.appendChild(pre); ul = null; }
+      continue;
+    }
+    if (pre) { code.push(raw.replace(/\s+$/, '')); pre.textContent = code.join('\n'); continue; }
     const line = raw.trim();
     if (!line) continue;
     const bullet = line.match(/^(?:[•●▪*]|-(?=\s))\s*(.*)$/);
@@ -307,8 +316,8 @@ function renderAnswer() {
   el('ansTitle').textContent = q.length > 160 ? q.slice(0, 159) + '…' : q;
   const t = a.text.trim();
   if (t.length < 3 || isNoAnswer(t)) { ansEl.textContent = 'Pensando…'; ansEl.classList.add('empty'); }
-  else { formatAnswer(ansEl, limitChars(t)); ansEl.classList.remove('empty'); }
-  const label = isMeeting()
+  else { formatAnswer(ansEl, answerText(a)); ansEl.classList.remove('empty'); }
+  const label = a.mode === 'screenshot' ? 'Sugerencia (captura)' : isMeeting()
     ? (a.who === 'me' ? 'Nota (tú)' : 'Nota')
     : a.who === 'me' ? 'Tu pregunta' : a.mode === 'manual' ? 'Respuesta (manual)' : 'Respuesta (auto)';
   el('ansMeta').textContent = label + ' · ' + hhmm(a.time);
@@ -332,7 +341,7 @@ el('nextAns').onclick = () => showAnswer(view + 1);
 el('copyAns').onclick = async () => {
   const a = answers[view];
   if (!a) return;
-  try { await navigator.clipboard.writeText(limitChars(a.text)); setStatus('Respuesta copiada'); }
+  try { await navigator.clipboard.writeText(answerText(a)); setStatus('Respuesta copiada'); }
   catch (_) { setStatus('No se pudo copiar', true); }
 };
 
@@ -480,6 +489,107 @@ function answerNow() {
   setTimeout(() => conns.them.control('Suggest'), 200);
 }
 el('answerBtn').onclick = answerNow;
+
+// --- screenshots: capture the screen, attach it to the conversation and,
+// on request, suggest an answer based on it (plus the recent transcript) ---
+let shots = []; // [{id, file, time, prompt, el}]
+let shotBusy = false;
+async function captureScreenshot() {
+  if (shotBusy) return;
+  shotBusy = true;
+  el('shotBtn').disabled = true;
+  setStatus('Capturando pantalla…', 'busy');
+  let r;
+  try { r = await window.api.captureScreen(); } catch (err) { r = { ok: false, error: err.message || String(err) }; }
+  shotBusy = false;
+  el('shotBtn').disabled = false;
+  if (!r || !r.ok) { setStatus('Captura: ' + (r && r.error || 'error'), true); return; }
+  const shot = { id: r.id, file: r.file || '', time: new Date(r.time || Date.now()), prompt: '' };
+  shots.push(shot);
+  addShotBubble(shot, r.dataUrl);
+  scheduleSessionLog();
+  if (isCompact()) setLayout('expanded');
+  setStatus('Captura adjunta — pulsa 💡 Sugerir para pedir una respuesta');
+}
+el('shotBtn').onclick = captureScreenshot;
+
+function addShotBubble(shot, dataUrl) {
+  txEmpty(false);
+  const m = document.createElement('div');
+  m.className = 'msg shot';
+  const img = document.createElement('img');
+  img.src = dataUrl;
+  img.alt = 'Captura de pantalla';
+  img.title = 'Clic para ampliar';
+  img.onclick = () => m.classList.toggle('big');
+  const row = document.createElement('div');
+  row.className = 'shot-row';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.maxLength = 1000;
+  input.placeholder = '¿Qué necesitas? (opcional)';
+  input.setAttribute('aria-label', 'Pregunta sobre la captura');
+  const btn = document.createElement('button');
+  btn.className = 'small primary';
+  btn.type = 'button';
+  btn.textContent = '💡 Sugerir';
+  btn.title = 'Sugerir una respuesta en base a esta captura y a la conversación reciente';
+  const go = () => { if (!btn.disabled) suggestFromShot(shot, input.value, btn); };
+  btn.onclick = go;
+  input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); go(); } });
+  row.append(input, btn);
+  const whoEl = document.createElement('div');
+  whoEl.className = 'who';
+  whoEl.textContent = '📸 Captura · ' + hhmm(shot.time) + (shot.file ? ' · ' + shot.file.split(/[\\/]/).pop() : '');
+  m.append(img, row, whoEl);
+  shot.el = m;
+  // Stay above the live (interim) bubbles, which keep themselves last.
+  const firstInterim = txList.querySelector('.msg.interim');
+  if (firstInterim) txList.insertBefore(m, firstInterim); else txList.appendChild(m);
+  scrollTx();
+}
+
+// Recent transcript as plain lines, for context next to the image.
+function recentTranscript(n) {
+  return bubbles.filter((b) => b.text).slice(-(n || 8))
+    .map((b) => whoLabel(b.who) + ': ' + (b.translation || b.text)).join('\n');
+}
+
+let shotReqSeq = 0;
+async function suggestFromShot(shot, prompt, btn) {
+  if (btn) btn.disabled = true;
+  shot.prompt = String(prompt || '').trim();
+  const id = 'shotreq-' + (++shotReqSeq);
+  const question = '📸 ' + (shot.prompt || 'Captura de pantalla · ' + hhmm(shot.time));
+  const a = { id, who: 'them', question, text: '', mode: 'screenshot', time: new Date(), done: false };
+  answers.push(a);
+  view = answers.length - 1;
+  if (isCompact()) setLayout('expanded');
+  setStatus('Analizando la captura…', 'busy');
+  renderAnswer();
+  let r;
+  try {
+    r = await window.api.suggestScreenshot(shot.id, { prompt: shot.prompt, transcript: recentTranscript(8) }, id);
+  } catch (err) { r = { ok: false, error: err.message || String(err) }; }
+  if (btn) btn.disabled = false;
+  if (!answers.includes(a)) return; // cleared meanwhile
+  if (!r || !r.ok || !String(r.text || '').trim()) {
+    removeAnswer(a);
+    setStatus('Captura: ' + (r && r.error || 'sin respuesta'), true);
+    return;
+  }
+  a.text = r.text;
+  a.done = true;
+  scheduleSessionLog();
+  setStatus('Sugerencia lista');
+  renderAnswer();
+}
+window.api.onScreenshotDelta((reqId, text) => {
+  const a = answers.find((x) => x.id === reqId && !x.done);
+  if (!a) return;
+  a.text = text;
+  if (answers[view] === a) renderAnswer();
+});
 
 // --- audio sources ---
 // Worklet → 200 ms Int16 frames → its gateway connection (+ level meter).
@@ -1063,10 +1173,11 @@ document.addEventListener('keydown', (ev) => {
 function sessionSnapshot() {
   const transcript = bubbles.filter((b) => b.text).map((b) => ({ who: b.who, text: b.text, translation: b.translation || '', time: b.time && b.time.toISOString() }));
   const done = answers.filter((a) => a.done && !isNoAnswer(a.text.trim()))
-    .map((a) => ({ who: a.who, question: a.question, text: limitChars(a.text), mode: a.mode, time: a.time.toISOString() }));
-  if (!transcript.length && !done.length) return null;
-  const times = [...transcript, ...done].map((x) => x.time).filter(Boolean).sort();
-  return { mode: appMode, startedAt: times[0], transcript, answers: done };
+    .map((a) => ({ who: a.who, question: a.question, text: answerText(a), mode: a.mode, time: a.time.toISOString() }));
+  const screenshots = shots.filter((x) => x.file).map((x) => ({ file: x.file, prompt: x.prompt || '', time: x.time.toISOString() }));
+  if (!transcript.length && !done.length && !screenshots.length) return null;
+  const times = [...transcript, ...done, ...screenshots].map((x) => x.time).filter(Boolean).sort();
+  return { mode: appMode, startedAt: times[0], transcript, answers: done, screenshots };
 }
 // Main keeps the latest snapshot and autosaves it (periodically and on quit).
 let logTimer = null;
@@ -1102,6 +1213,7 @@ async function clearAll() {
   txEmpty(true);
   chipsEl.replaceChildren();
   answers = []; view = -1; renderAnswer();
+  shots = [];
   configureGateway(true); // forget previous turns on the gateway too
   if (saved) setStatus('Log guardado: ' + saved.split(/[\\/]/).pop());
   else if (!statusEl.classList.contains('err')) setStatus(running ? idleStatus() : 'Limpio');
@@ -1112,6 +1224,7 @@ el('clear').onclick = clearAll;
 window.api.onShortcut((name) => {
   if (name === 'answer') answerNow();
   else if (name === 'clear') clearAll();
+  else if (name === 'screenshot') captureScreenshot();
 });
 document.addEventListener('keydown', (ev) => {
   if (!ev.ctrlKey || ev.altKey || ev.metaKey) return;
