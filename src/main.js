@@ -43,6 +43,7 @@ let expandedHeight = 560;
 let context = {
   mode: 'interview',      // 'interview' | 'meeting'
   meetingContext: '',     // meeting mode: who/what the conversation is about
+  meetingDocuments: [],   // extracted reference documents for meeting mode
   cv: '',
   jd: '',
   responseChars: 500,
@@ -59,6 +60,7 @@ function loadContext() {
   context.shareInterfaceVisible = context.shareInterfaceVisible === true;
   context.mode = llm.normalizeMode(context.mode);
   context.meetingContext = llm.normalizeMeetingContext(context.meetingContext);
+  context.meetingDocuments = llm.normalizeMeetingDocuments(context.meetingDocuments);
 }
 function saveContextToDisk() {
   try { fs.writeFileSync(contextFile(), JSON.stringify(context), 'utf8'); } catch (e) { console.log('[ctx] save err', e.message); }
@@ -105,6 +107,7 @@ function createWindow() {
     minimizable: false,
     resizable: true,
     hasShadow: false,
+    backgroundColor: '#00000000', // never paint an opaque (white) background behind the page
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -540,6 +543,7 @@ ipcMain.handle('save-context', (_e, data) => {
   context = {
     mode: context.mode,
     meetingContext: llm.normalizeMeetingContext(data && data.meetingContext),
+    meetingDocuments: llm.normalizeMeetingDocuments(data && data.meetingDocuments),
     cv: String(data && data.cv || ''),
     jd: String(data && data.jd || ''),
     responseChars: llm.normalizeResponseChars(data && data.responseChars),
@@ -553,6 +557,7 @@ ipcMain.handle('save-context', (_e, data) => {
     ok: true,
     cvLen: context.cv.length,
     jdLen: context.jd.length,
+    documentCount: context.meetingDocuments.length,
     responseChars: context.responseChars,
     responseFormat: context.responseFormat,
     shareInterfaceVisible: context.shareInterfaceVisible,
@@ -560,6 +565,25 @@ ipcMain.handle('save-context', (_e, data) => {
 });
 
 ipcMain.on('set-click-through', (_e, on) => setClickThrough(on));
+
+// Window drag done by hand instead of -webkit-app-region: drag. The OS move
+// loop (WM_SYSCOMMAND/SC_MOVE) can draw a drag outline / flash a white frame
+// that screen-share captures even with content protection on; moving with
+// setBounds never enters that loop, so nothing leaks while hidden.
+let dragState = null;
+ipcMain.on('drag-start', () => {
+  if (!win) return;
+  const c = screen.getCursorScreenPoint();
+  const b = win.getBounds();
+  dragState = { dx: c.x - b.x, dy: c.y - b.y, width: b.width, height: b.height };
+});
+ipcMain.on('drag-move', () => {
+  if (!win || !dragState) return;
+  const c = screen.getCursorScreenPoint();
+  // setBounds with the fixed size: setPosition alone can grow the window across mixed-DPI monitors.
+  win.setBounds({ x: c.x - dragState.dx, y: c.y - dragState.dy, width: dragState.width, height: dragState.height }, false);
+});
+ipcMain.on('drag-end', () => { dragState = null; });
 
 // Compact bar (toolbar + live strip) <-> expanded (transcript + answer panes).
 // Keeps x/y/width; remembers the expanded height the user dragged to.

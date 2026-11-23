@@ -35,6 +35,7 @@ let responseChars = 500; // answer length limit (from settings)
 // and previous conversations.
 let appMode = 'interview';
 const isMeeting = () => appMode === 'meeting';
+let meetingDocuments = [];
 let running = false;     // any live source (system audio or mic) active
 
 let practiceHistory = [];
@@ -636,6 +637,9 @@ function applyModeUi() {
     ? 'Pulsa 🖥 para escuchar la reunión (audio del sistema) y 🎙 para tu voz o una conversación en persona.'
     : 'Pulsa 🖥 para escuchar al entrevistador y 🎙 para tu voz.';
   el('ansPane').setAttribute('aria-label', isMeeting() ? 'Notas en vivo' : 'Respuesta sugerida');
+  el('endMeetingBtn').title = isMeeting()
+    ? 'Terminar la reunión: recoge las últimas frases, deja de escuchar, resume y guarda en la memoria'
+    : 'Terminar la entrevista: recoge las últimas frases, deja de escuchar y guarda el log en el historial';
   applyAutoUi();
   applyMineUi();
   renderAnswer();
@@ -831,10 +835,12 @@ function flushInterim(who) {
 // flush what is still in the pipeline (Finalize + pending interim), then stop
 // listening, summarise into the memory and start a fresh session. If the
 // summary fails the transcript stays on screen to retry with 📝 Resumir.
+// Interview mode does the same minus the summary: stop, save the log, clear.
 let endingMeeting = false;
 async function endMeeting() {
   if (endingMeeting || summarizing) return;
-  if (!running && !bubbles.some((b) => b.text)) { setStatus('No hay reunión en curso', true); return; }
+  const meeting = isMeeting();
+  if (!running && !bubbles.some((b) => b.text)) { setStatus(meeting ? 'No hay reunión en curso' : 'No hay entrevista en curso', true); return; }
   endingMeeting = true;
   const btn = el('endMeetingBtn');
   btn.disabled = true;
@@ -849,6 +855,11 @@ async function endMeeting() {
     }
     // Chinese mode: wait for translations still in flight.
     await Promise.all(bubbles.filter((b) => b.tr && (b.trTimer || b.trPromise)).map((b) => translateBubble(b).catch(() => '')));
+    if (!meeting) {
+      await clearAll(); // saves the session log (transcripciones/)
+      if (!statusEl.classList.contains('err')) setStatus('Entrevista terminada · log guardado en el 📚 Historial');
+      return;
+    }
     if (!(await summarizeConversation())) {
       setStatus('No se pudo resumir: la conversación sigue en pantalla, reintenta con 📝 Resumir', true);
       return;
@@ -1128,10 +1139,40 @@ el('clickthru').onclick = () => {
 // main process may toggle it from the global shortcut or the tray
 window.api.onClickThroughChanged(applyClickThroughUi);
 
+// --- window drag (replaces -webkit-app-region: drag, see main.js drag-start) ---
+// Toolbar and practice header move the window; their controls keep working.
+const DRAG_HANDLES = '#toolbar, .practice-head';
+const DRAG_SKIP = 'button, select, input, textarea, summary, a, label, [contenteditable]';
+let dragPointer = null;
+document.addEventListener('pointerdown', (ev) => {
+  if (ev.button !== 0 || clickThrough) return;
+  const handle = ev.target.closest(DRAG_HANDLES);
+  if (!handle || ev.target.closest(DRAG_SKIP)) return;
+  ev.preventDefault();
+  dragPointer = { id: ev.pointerId, handle };
+  handle.setPointerCapture(ev.pointerId);
+  window.api.dragStart();
+});
+document.addEventListener('pointermove', (ev) => {
+  if (dragPointer && ev.pointerId === dragPointer.id) window.api.dragMove();
+});
+function endDrag(ev) {
+  if (!dragPointer || (ev && ev.pointerId !== undefined && ev.pointerId !== dragPointer.id)) return;
+  try { dragPointer.handle.releasePointerCapture(dragPointer.id); } catch (_) {}
+  dragPointer = null;
+  window.api.dragEnd();
+}
+document.addEventListener('pointerup', endDrag);
+document.addEventListener('pointercancel', endDrag);
+document.addEventListener('lostpointercapture', endDrag, true);
+window.addEventListener('blur', () => endDrag());
+
 // --- visible / hidden in screenshots (content protection) ---
 let captureVisible = false;
+document.documentElement.classList.add('stealth'); // hidden by default until config says otherwise
 function applyCaptureUi(on) {
   captureVisible = on;
+  document.documentElement.classList.toggle('stealth', !on);
   const header = el('captureToggle');
   header.classList.toggle('active', on);
   header.setAttribute('aria-pressed', String(on));
@@ -1162,11 +1203,38 @@ function ctxInfoText() {
   el('ctxInfo').className = '';
   el('ctxInfo').textContent = 'CV: ' + el('cv').value.length + ' caracteres · Cargo: ' + el('jd').value.length + ' caracteres';
 }
+function renderMeetingDocuments() {
+  const list = el('meetingDocumentsList');
+  list.replaceChildren();
+  meetingDocuments.forEach((doc, index) => {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'doc-name';
+    name.textContent = doc.name;
+    const size = document.createElement('span');
+    size.className = 'doc-size';
+    size.textContent = doc.text.length.toLocaleString('es-CL') + ' caracteres';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'doc-remove';
+    remove.textContent = '✕';
+    remove.setAttribute('aria-label', 'Quitar ' + doc.name);
+    remove.onclick = () => { meetingDocuments.splice(index, 1); renderMeetingDocuments(); };
+    li.append(name, size, remove);
+    list.append(li);
+  });
+  const total = meetingDocuments.reduce((sum, doc) => sum + doc.text.length, 0);
+  el('meetingDocumentsStatus').textContent = meetingDocuments.length
+    ? `${meetingDocuments.length}/5 documentos · ${total.toLocaleString('es-CL')}/12.000 caracteres`
+    : 'Sin documentos agregados.';
+}
 function closeCtxPanel() { el('ctxPanel').hidden = true; el('settings').focus(); }
 el('settings').onclick = async () => {
   if (isCompact()) setLayout('expanded'); // the panel needs the full window
   const c = await window.api.getContext();
   el('meetingContext').value = c.meetingContext || '';
+  meetingDocuments = Array.isArray(c.meetingDocuments) ? c.meetingDocuments.map((doc) => ({ name: doc.name, text: doc.text })) : [];
+  renderMeetingDocuments();
   el('memPanel').hidden = true;
   el('histPanel').hidden = true;
   el('cv').value = c.cv || '';
@@ -1190,6 +1258,7 @@ el('ctxSave').onclick = async () => {
   if (!charsInput.checkValidity()) { charsInput.reportValidity(); return; }
   const r = await window.api.saveContext({
     meetingContext: el('meetingContext').value,
+    meetingDocuments,
     cv: el('cv').value,
     jd: el('jd').value,
     responseChars: charsInput.value,
@@ -1214,6 +1283,29 @@ el('ctxSave').onclick = async () => {
 };
 el('cv').oninput = ctxInfoText;
 el('jd').oninput = ctxInfoText;
+
+el('meetingDocumentsBtn').onclick = () => el('meetingDocuments').click();
+el('meetingDocuments').onchange = async (ev) => {
+  const files = Array.from(ev.target.files || []);
+  const status = el('meetingDocumentsStatus');
+  for (const file of files) {
+    if (meetingDocuments.length >= 5) { status.textContent = 'Máximo 5 documentos.'; break; }
+    if (file.size > 10 * 1024 * 1024) { status.textContent = `${file.name}: supera 10 MB.`; continue; }
+    if (!/\.(pdf|txt|md)$/i.test(file.name)) { status.textContent = `${file.name}: formato no compatible.`; continue; }
+    status.textContent = 'Leyendo ' + file.name + '…';
+    try {
+      const raw = /\.pdf$/i.test(file.name) ? await pdfToText(await file.arrayBuffer()) : await file.text();
+      const used = meetingDocuments.reduce((sum, doc) => sum + doc.text.length, 0);
+      const text = raw.replace(/\0/g, '').trim().slice(0, Math.max(0, 12000 - used));
+      if (!text) throw new Error(used >= 12000 ? 'límite total alcanzado' : 'no contiene texto extraíble');
+      meetingDocuments.push({ name: file.name, text });
+      renderMeetingDocuments();
+    } catch (err) {
+      status.textContent = `${file.name}: ${err.message || err}`;
+    }
+  }
+  ev.target.value = '';
+};
 
 el('cvFileBtn').onclick = () => el('cvFile').click();
 el('cvFile').onchange = async (ev) => {

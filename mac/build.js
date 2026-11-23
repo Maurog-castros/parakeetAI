@@ -20,6 +20,8 @@
       NSAudioCaptureUsageDescription: 'ParakeetAI escucha el audio del sistema para transcribir al entrevistador.',
       NSMicrophoneUsageDescription: 'ParakeetAI usa el micrófono para transcribir tu voz.',
       NSScreenCaptureUsageDescription: 'ParakeetAI necesita este permiso para acceder al audio del sistema.',
+      // Packaged builds save sessions to ~/Documents/ParakeetAI/transcripciones.
+      NSDocumentsFolderUsageDescription: 'ParakeetAI guarda las transcripciones en Documentos/ParakeetAI.',
     },
   });
   console.log(paths[0]);
