@@ -19,7 +19,7 @@ permissions:
 jobs:
   dmg:
     name: dmg (${{ matrix.arch }})
-    runs-on: macos-14
+    runs-on: macos-latest # Apple Silicon; builds both archs
     strategy:
       fail-fast: false
       matrix:
