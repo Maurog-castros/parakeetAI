@@ -9,7 +9,7 @@ const { TRANSCRIPT_FILE } = require('./sessionFiles');
 
 const STAMP_RE = /^(\d{4})-(\d\d)-(\d\d)_(\d\d)-(\d\d)-(\d\d)/;
 // Files shown in the viewer, in tab order.
-const VIEW_FILES = ['resumen.md', 'pendientes.md', 'ideas.md', 'proximos-pasos.md', TRANSCRIPT_FILE];
+const VIEW_FILES = ['resumen.md', 'pendientes.md', 'tareas.md', 'ideas.md', 'ejemplos.md', 'proximos-pasos.md', TRANSCRIPT_FILE];
 
 function stampDate(name) {
   const m = STAMP_RE.exec(name);
@@ -51,7 +51,7 @@ function sessionInfo(root, name) {
   const started = stampDate(name);
   const transcriptPath = loc.kind === 'folder' ? path.join(loc.path, TRANSCRIPT_FILE) : loc.path;
   const head = readText(transcriptPath, 400);
-  const mode = /^#\s*Reuni[oó]n/m.test(head) ? 'meeting' : /^#\s*Entrevista/m.test(head) ? 'interview' : '';
+  const mode = /^#\s*Clase/m.test(head) ? 'class' : /^#\s*Reuni[oó]n/m.test(head) ? 'meeting' : /^#\s*Entrevista/m.test(head) ? 'interview' : '';
   let meeting = null;
   let files = [];
   if (loc.kind === 'folder') {
@@ -60,14 +60,14 @@ function sessionInfo(root, name) {
   } else {
     files = [TRANSCRIPT_FILE];
   }
-  const title = (meeting && meeting.title) || deslug(name) || (mode === 'interview' ? 'Entrevista' : 'Conversación');
+  const title = (meeting && meeting.title) || deslug(name) || (mode === 'interview' ? 'Entrevista' : mode === 'class' ? 'Clase' : 'Conversación');
   return {
     id: name,
     kind: loc.kind,
     path: loc.path,
     startedAt: started ? started.toISOString() : null,
     title,
-    mode: mode || (meeting ? 'meeting' : ''),
+    mode: mode || (meeting ? (meeting.kind === 'class' ? 'class' : 'meeting') : ''),
     hasSummary: !!meeting,
     summary: meeting && meeting.summary ? String(meeting.summary).slice(0, 300) : '',
     files: VIEW_FILES.filter((f) => files.includes(f)),

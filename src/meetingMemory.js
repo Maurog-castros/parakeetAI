@@ -18,6 +18,10 @@ const iso = (v) => {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 };
 
+// Meetings and classes share one store; `kind` keeps them apart (old data
+// without kind is 'meeting').
+const kindOf = (v) => (v === 'class' ? 'class' : 'meeting');
+
 function emptyMemory() {
   return { version: 1, meetings: [], items: [] };
 }
@@ -29,6 +33,8 @@ function normalizeItem(it) {
     id: str(it.id, 40),
     text,
     owner: str(it.owner, 80),
+    due: str(it.due, 80), // class homework: due date as said in class
+    kind: kindOf(it.kind),
     createdAt: iso(it.createdAt) || new Date().toISOString(),
     meetingId: str(it.meetingId, 60),
     done: it.done === true,
@@ -42,6 +48,7 @@ function normalizeMeeting(m) {
   if (!id) return null;
   return {
     id,
+    kind: kindOf(m.kind),
     startedAt: iso(m.startedAt),
     endedAt: iso(m.endedAt),
     title: str(m.title, 120) || 'Conversación',
@@ -51,6 +58,8 @@ function normalizeMeeting(m) {
     decisions: list(m.decisions),
     nextSteps: list(m.nextSteps),
     initiatives: list(m.initiatives),
+    examples: list(m.examples),
+    questions: list(m.questions),
     folder: str(m.folder, 400), // session folder under transcripciones/
   };
 }
@@ -81,8 +90,9 @@ function meetingIdFor(startedAt) {
 
 // Open action items, excluding those created by `exceptMeetingId` (the
 // meeting being re-summarised: its own items get regenerated).
-function openItems(mem, exceptMeetingId) {
-  return mem.items.filter((it) => !it.done && it.meetingId !== exceptMeetingId);
+// kind: only items of that kind ('meeting' | 'class'); omitted = all.
+function openItems(mem, exceptMeetingId, kind) {
+  return mem.items.filter((it) => !it.done && it.meetingId !== exceptMeetingId && (!kind || it.kind === kindOf(kind)));
 }
 
 // Text block with what the assistant should remember: open action items (with
@@ -91,22 +101,24 @@ function buildMemoryContext(mem, options) {
   const opts = options || {};
   const except = opts.exceptMeetingId || '';
   const maxMeetings = opts.maxMeetings == null ? 4 : opts.maxMeetings;
-  const pending = openItems(mem, except);
-  const past = mem.meetings.filter((m) => m.id !== except).slice(-maxMeetings);
-  const lines = ['=== PENDIENTES ABIERTOS DE CONVERSACIONES ANTERIORES ==='];
-  if (!pending.length) lines.push('(ninguno)');
+  const kind = kindOf(opts.kind);
+  const isClass = kind === 'class';
+  const pending = openItems(mem, except, kind);
+  const past = mem.meetings.filter((m) => m.id !== except && m.kind === kind).slice(-maxMeetings);
+  const lines = [isClass ? '=== TAREAS ABIERTAS DE CLASES ANTERIORES ===' : '=== PENDIENTES ABIERTOS DE CONVERSACIONES ANTERIORES ==='];
+  if (!pending.length) lines.push(isClass ? '(ninguna)' : '(ninguno)');
   for (const it of pending) {
     const day = it.createdAt ? it.createdAt.slice(0, 10) : '';
-    lines.push(`- [${it.id}] ${it.text}${it.owner ? ` (responsable: ${it.owner})` : ''}${day ? ` — desde ${day}` : ''}`);
+    lines.push(`- [${it.id}] ${it.text}${it.owner ? ` (responsable: ${it.owner})` : ''}${it.due ? ` (entrega: ${it.due})` : ''}${day ? ` — desde ${day}` : ''}`);
   }
-  lines.push('', '=== CONVERSACIONES ANTERIORES (más reciente al final) ===');
+  lines.push('', isClass ? '=== CLASES ANTERIORES (más reciente al final) ===' : '=== CONVERSACIONES ANTERIORES (más reciente al final) ===');
   if (!past.length) lines.push('(ninguna)');
   for (const m of past) {
     lines.push(`## ${m.startedAt ? m.startedAt.slice(0, 10) : ''} · ${m.title}`);
     if (m.summary) lines.push(m.summary);
     if (m.decisions.length) lines.push('Decisiones: ' + m.decisions.join('; '));
-    if (m.ideas.length) lines.push('Ideas: ' + m.ideas.join('; '));
-    if (m.nextSteps.length) lines.push('Próximos pasos: ' + m.nextSteps.join('; '));
+    if (m.ideas.length) lines.push((isClass ? 'Ideas principales: ' : 'Ideas: ') + m.ideas.join('; '));
+    if (m.nextSteps.length) lines.push((isClass ? 'Para repasar: ' : 'Próximos pasos: ') + m.nextSteps.join('; '));
     lines.push('');
   }
   return lines.join('\n').trim();
@@ -128,7 +140,7 @@ function normalizeSummary(raw) {
   const s = raw && typeof raw === 'object' ? raw : {};
   const actionItems = (Array.isArray(s.actionItems) ? s.actionItems : [])
     .map((a) => (typeof a === 'string' ? { text: a } : a))
-    .map((a) => ({ text: str(a && a.text), owner: str(a && a.owner, 80) }))
+    .map((a) => ({ text: str(a && a.text), owner: str(a && a.owner, 80), due: str(a && a.due, 80) }))
     .filter((a) => a.text)
     .slice(0, 20);
   const resolvedItemIds = (Array.isArray(s.resolvedItemIds) ? s.resolvedItemIds : [])
@@ -143,6 +155,8 @@ function normalizeSummary(raw) {
     resolvedItemIds,
     nextSteps: list(s.nextSteps),
     initiatives: list(s.initiatives),
+    examples: list(s.examples),
+    questions: list(s.questions),
   };
 }
 
@@ -153,6 +167,7 @@ function applySummary(memory, summary, info) {
   const mem = normalizeMemory(memory);
   const s = normalizeSummary(summary);
   const meetingId = str(info && info.meetingId, 60) || meetingIdFor(info && info.startedAt);
+  const kind = kindOf(info && info.kind);
   const now = iso(info && info.endedAt) || iso(info && info.startedAt) || new Date().toISOString();
 
   mem.meetings = mem.meetings.filter((m) => m.id !== meetingId);
@@ -163,19 +178,20 @@ function applySummary(memory, summary, info) {
 
   const resolvedItems = [];
   for (const id of s.resolvedItemIds) {
-    const it = mem.items.find((x) => x.id === id && !x.done);
+    const it = mem.items.find((x) => x.id === id && !x.done && x.kind === kind);
     if (!it) continue;
     it.done = true; it.doneAt = now; it.doneMeetingId = meetingId;
     resolvedItems.push(it);
   }
   const newItems = [];
   for (const a of s.actionItems) {
-    const it = { id: nextItemId(mem), text: a.text, owner: a.owner, createdAt: now, meetingId, done: false, doneAt: null, doneMeetingId: '' };
+    const it = { id: nextItemId(mem), text: a.text, owner: a.owner, due: a.due, kind, createdAt: now, meetingId, done: false, doneAt: null, doneMeetingId: '' };
     mem.items.push(it);
     newItems.push(it);
   }
   const meeting = normalizeMeeting({
     id: meetingId,
+    kind,
     startedAt: info && info.startedAt,
     endedAt: now,
     title: s.title,
@@ -185,6 +201,8 @@ function applySummary(memory, summary, info) {
     decisions: s.decisions,
     nextSteps: s.nextSteps,
     initiatives: s.initiatives,
+    examples: s.examples,
+    questions: s.questions,
     folder: info && info.folder,
   });
   mem.meetings.push(meeting);
@@ -220,7 +238,8 @@ function removeMeeting(memory, meetingId) {
 // Markdown block appended to the session log.
 function summaryMarkdown(meeting, newItems, resolvedItems) {
   const m = meeting || {};
-  const out = ['## Resumen de la conversación', ''];
+  const isClass = m.kind === 'class';
+  const out = [isClass ? '## Resumen de la clase' : '## Resumen de la conversación', ''];
   if (m.title) out.push(`**${m.title}**`, '');
   if (m.summary) out.push(m.summary, '');
   const section = (title, arr, fmt) => {
@@ -229,10 +248,20 @@ function summaryMarkdown(meeting, newItems, resolvedItems) {
     for (const x of arr) out.push('- ' + (fmt ? fmt(x) : x));
     out.push('');
   };
+  const itemFmt = (it) => `[ ] ${it.text}${it.owner ? ` — ${it.owner}` : ''}${it.due ? ` (entrega: ${it.due})` : ''}`;
   section('Temas', m.topics);
+  if (isClass) {
+    section('Ideas principales', m.ideas);
+    section('Ejemplos', m.examples);
+    section('Tareas', newItems, itemFmt);
+    section('Tareas anteriores cerradas', resolvedItems, (it) => `[x] ${it.text}`);
+    section('Para repasar', m.nextSteps);
+    section('Dudas para la próxima clase', m.questions);
+    return out.join('\n').trim();
+  }
   section('Ideas', m.ideas);
   section('Decisiones', m.decisions);
-  section('Pendientes nuevos', newItems, (it) => `[ ] ${it.text}${it.owner ? ` — ${it.owner}` : ''}`);
+  section('Pendientes nuevos', newItems, itemFmt);
   section('Pendientes anteriores resueltos', resolvedItems, (it) => `[x] ${it.text}`);
   section('Próximos pasos', m.nextSteps);
   section('Próximas iniciativas', m.initiatives);

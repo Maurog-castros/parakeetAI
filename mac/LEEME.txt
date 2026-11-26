@@ -12,8 +12,12 @@ Necesitas: macOS 14.2 (Sonoma) o más nuevo, internet, unos 10 minutos.
    ventana de Terminal y pulsa Enter.
    (Usar Terminal evita el bloqueo de macOS a archivos descargados.)
 
-   El instalador descarga lo necesario, construye la app y la abre.
-   Queda en tu carpeta de usuario > Aplicaciones > ParakeetAI.
+   La primera vez descarga lo necesario, construye la app y la abre
+   (unos minutos). Queda en tu carpeta de usuario > Aplicaciones > ParakeetAI.
+
+   Versiones nuevas: descomprime el zip nuevo y repite este paso 3.
+   Si ParakeetAI ya está instalado, solo actualiza el código (segundos)
+   y conserva tu configuración.
 
 4) Permisos (solo la primera vez):
    - Pulsa el botón 🖥 (entrevistador = audio del sistema). macOS pedirá
@@ -28,6 +32,7 @@ Uso rápido
 - Cmd+Shift+Space: mostrar / ocultar el asistente.
 - Cmd+Shift+M: el ratón atraviesa la ventana (activar/desactivar).
 - Cmd+Shift+Q: salir.
+- Cmd+Shift+X: captura de pantalla (usa el mismo permiso de "Grabación de pantalla").
 - El punto de colores en la barra de menú (arriba a la derecha) también
   muestra/oculta y tiene la opción Salir.
 - ⚙ Configuración: pega la descripción del cargo y tu CV.
@@ -39,3 +44,7 @@ Nota: al compartir pantalla en Zoom/Meet/Teams, macOS reciente puede mostrar
 el asistente a los demás. Pruébalo antes de una llamada real.
 
 No compartas esta carpeta: contiene claves de acceso privadas (archivo .env).
+
+Configuración por usuario: la app guarda todo lo del panel ⚙ en
+~/Documents/ParakeetAI/asistente.conf (texto plano, editable). Si pones un
+asistente.conf junto al instalador, se copia ahí en la primera instalación.

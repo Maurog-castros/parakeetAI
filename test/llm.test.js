@@ -100,7 +100,7 @@ test('modo reunión: instrucciones de notas en vivo y memoria en el contexto', (
   assert.match(buildInstructions(ctx), /💡 Idea:/);
   assert.doesNotMatch(buildInstructions(ctx), /ENTREVISTADOR/);
   assert.match(buildContextBlock(ctx), /Equipo de producto[\s\S]*\[p1\] Cotizar/);
-  assert.equal(gatewayConfigure(ctx).max_tokens, 120);
+  assert.equal(gatewayConfigure(ctx).max_tokens, 450); // room for a suggested answer
   assert.match(buildInstructions({ mode: 'otro' }), /ENTREVISTADOR/);
   assert.equal(transcriptText([{ who: 'me', text: 'hola' }, { who: 'them', text: '你好', translation: 'hola' }, { who: 'them', text: ' ' }]), 'Yo: hola\nOtros: hola');
   assert.match(buildMeetingSummaryPrompt(ctx), /"resolvedItemIds"/);
@@ -135,4 +135,43 @@ test('captura: mensaje multimodal con imagen, pedido y conversación', () => {
 test('captura: modo reunión usa su propio prompt', () => {
   const { buildScreenshotPrompt } = require('../src/llm');
   assert.match(buildScreenshotPrompt({ mode: 'meeting' }), /reunión, llamada o chat/);
+});
+
+const llm = require('../src/llm');
+
+test('instrucciones personales separadas por modo', () => {
+  const ctx = { responseInstructions: 'solo 4 bullets con mi experiencia', meetingInstructions: 'anota quién se compromete', classInstructions: 'resalta fórmulas' };
+  const meeting = llm.buildMeetingInstructions(Object.assign({ mode: 'meeting' }, ctx));
+  assert.ok(meeting.includes('anota quién se compromete'));
+  assert.ok(!meeting.includes('4 bullets'));
+  const cls = llm.buildClassInstructions(Object.assign({ mode: 'class' }, ctx));
+  assert.ok(cls.includes('resalta fórmulas') && !cls.includes('4 bullets'));
+  assert.equal(llm.instructionsFor(Object.assign({ mode: 'interview' }, ctx)), 'solo 4 bullets con mi experiencia');
+  assert.equal(llm.instructionsKey('meeting'), 'meetingInstructions');
+});
+
+test('notas de reunión: memoria solo para reconocer y una línea', () => {
+  const p = llm.buildMeetingInstructions({ mode: 'meeting' });
+  assert.match(p, /MEMORIA[^\n]*NO escribas notas/);
+  assert.match(p, /UNA línea/);
+  assert.match(p, /tercera persona/);
+});
+
+test('reunión: pregunta dirigida a la usuaria pide respuesta sugerida, no nota', () => {
+  const p = llm.buildMeetingInstructions({ mode: 'meeting', userName: ' Ana\nPérez ', meetingInstructions: 'kick off Odoo' });
+  assert.match(p, /dirigido a mí, Ana Pérez/);
+  assert.match(p, /💬 Respuesta:/);
+  assert.match(p, /3 y 5 viñetas/);
+  assert.match(p, /sobre todo a las respuestas sugeridas/);
+  assert.ok(!p.includes('sin romper el formato'));
+  const anon = llm.buildMeetingInstructions({ mode: 'meeting' });
+  assert.match(anon, /la persona que usa este asistente/);
+  assert.match(llm.buildInstructions({ mode: 'class', userName: 'Ana' }), /dirigido a mí, Ana/);
+});
+
+test('normalizeUserName e isReplyText', () => {
+  assert.equal(llm.normalizeUserName('  Ana <b>Pérez</b> '), 'Ana b Pérez /b');
+  assert.equal(llm.normalizeUserName('x'.repeat(200)).length, 80);
+  assert.ok(llm.isReplyText('💬 Respuesta:\n• Hola'));
+  assert.ok(!llm.isReplyText('💡 Idea: algo'));
 });

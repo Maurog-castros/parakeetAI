@@ -1,9 +1,11 @@
 'use strict';
-// Builds ParakeetAI.app on the Mac itself (so it is not quarantined and can be
-// ad-hoc signed locally). Run by "Instalar ParakeetAI.command".
+// Builds ParakeetAI.app on a Mac. Run by "Instalar ParakeetAI.command" (on the
+// user's Mac) and by .github/workflows/mac-dmg.yml (the downloadable .dmg).
 (async () => {
   const { packager } = await import('@electron/packager'); // ESM-only package
-  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+  // TARGET_ARCH lets CI build the Intel app on an Apple Silicon runner.
+  const want = process.env.TARGET_ARCH || process.arch;
+  const arch = want === 'arm64' ? 'arm64' : 'x64';
   const paths = await packager({
     dir: __dirname,
     name: 'ParakeetAI',
@@ -24,5 +26,5 @@
       NSDocumentsFolderUsageDescription: 'ParakeetAI guarda las transcripciones en Documentos/ParakeetAI.',
     },
   });
-  console.log(paths[0]);
+  console.log(require('path').resolve(paths[0]));
 })().catch((e) => { console.error(e); process.exit(1); });

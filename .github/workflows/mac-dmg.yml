@@ -1,0 +1,74 @@
+# Builds ParakeetAI-arm64.dmg (Apple Silicon) and ParakeetAI-x64.dmg (Intel).
+# Run it from GitHub > Actions > "Instalador Mac (.dmg)" > Run workflow, or by
+# pushing a tag like v0.2.0. The .dmg files appear as artifacts of the run.
+#
+# The repository is public, so the .dmg carries NO access keys: each user
+# loads their claves.env from ⚙ Configuración > Cargar archivo de claves.
+# The app is ad-hoc signed (no Apple Developer account): the first time,
+# macOS asks to allow it in Ajustes del Sistema > Privacidad y seguridad.
+name: Instalador Mac (.dmg)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  dmg:
+    name: dmg (${{ matrix.arch }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Preparar fuentes de la app
+        run: |
+          mkdir stage
+          cp mac/package.json mac/build.js stage/
+          cp -R src stage/src
+          # Never ship keys or personal settings in a public download.
+          rm -f stage/.env stage/asistente.conf stage/src/.env
+
+      - name: Instalar dependencias
+        working-directory: stage
+        run: npm install --no-audit --no-fund
+
+      - name: Construir y firmar ParakeetAI.app
+        working-directory: stage
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          OUT="$(node build.js | tail -n 1)"
+          APP="$OUT/ParakeetAI.app"
+          test -d "$APP"
+          if [ -e "$APP/Contents/Resources/app/.env" ]; then echo "ERROR: .env dentro de la app"; exit 1; fi
+          # Ad-hoc signature: required on Apple Silicon after Info.plist changes.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+
+      - name: Crear .dmg
+        run: |
+          mkdir dmg
+          ditto "$APP" dmg/ParakeetAI.app
+          ln -s /Applications dmg/Aplicaciones
+          cp mac/LEEME-dmg.txt "dmg/Léeme.txt"
+          hdiutil create -volname "ParakeetAI" -srcfolder dmg -ov -format UDZO "ParakeetAI-${{ matrix.arch }}.dmg"
+          ls -lh ParakeetAI-*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ParakeetAI-mac-${{ matrix.arch }}
+          path: ParakeetAI-${{ matrix.arch }}.dmg
+          retention-days: 30
+          if-no-files-found: error

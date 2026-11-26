@@ -29,6 +29,7 @@ const ROOT = path.join(__dirname, '..');
       /^\/\.git($|\/)/,
       /\.(md|log|cmd|code-workspace)$/,
       /^\/\.(env\.example|gitignore)$/,
+      /^\/asistente\.conf(\.tmp)?$/, // your own settings (CV…): never in the zip
     ],
   });
   console.log('app:', out);

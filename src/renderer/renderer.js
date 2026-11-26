@@ -33,8 +33,13 @@ let responseChars = 500; // answer length limit (from settings)
 // 'interview': job-interview copilot. 'meeting': any conversation (work,
 // friends): live notes, summary on demand and a memory of open action items
 // and previous conversations.
+// 'class': online class — same pipeline as meetings (notes, summary, memory)
+// but tuned for studying: main ideas, examples, homework.
 let appMode = 'interview';
-const isMeeting = () => appMode === 'meeting';
+const APP_MODES = ['interview', 'meeting', 'class'];
+const isMeeting = () => appMode === 'meeting' || appMode === 'class'; // notes + summary + memory
+const isClass = () => appMode === 'class';
+const memKind = () => (isClass() ? 'class' : 'meeting');
 let meetingDocuments = [];
 let running = false;     // any live source (system audio or mic) active
 
@@ -52,11 +57,6 @@ let practiceAudio = null;
 const conns = { them: window.createSTT('them'), me: window.createSTT('me') };
 const sources = { them: null, me: null }; // active audio pipelines
 
-function toInt16(f32) {
-  const i = new Int16Array(f32.length);
-  for (let k = 0; k < f32.length; k++) { let v = Math.max(-1, Math.min(1, f32[k])); i[k] = v < 0 ? v * 0x8000 : v * 0x7fff; }
-  return i;
-}
 
 // --- status pill ---
 // kind: true/'err' for errors, 'busy' while generating, falsy otherwise.
@@ -91,8 +91,23 @@ function tickTimer() {
   const s = Math.floor((Date.now() - timerStart) / 1000);
   el('timer').textContent = '⏱ ' + String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
 }
+// Pauses listening after a long stretch with no recognised speech, so a
+// session left open doesn't keep transcribing the TV or the house for hours.
+const IDLE_PAUSE_MS = 10 * 60 * 1000;
+let lastSpeechAt = Date.now();
+let idleHandle = null;
+const noteSpeech = () => { lastSpeechAt = Date.now(); };
+async function checkIdle() {
+  if (!running || Date.now() - lastSpeechAt < IDLE_PAUSE_MS) return;
+  await Promise.all([stopSource('them'), stopSource('me')]);
+  setStatus('En pausa: ' + Math.round(IDLE_PAUSE_MS / 60000) + ' min sin voz. Pulsa 🖥 / 🎙 para seguir.', true);
+}
 function updateRunning() {
+  const wasRunning = running;
   running = !!(sources.them || sources.me);
+  if (running && !wasRunning) noteSpeech();
+  if (running && !idleHandle) idleHandle = setInterval(checkIdle, 30000);
+  if (!running && idleHandle) { clearInterval(idleHandle); idleHandle = null; }
   el('timer').classList.toggle('live', running);
   el('meter').classList.toggle('on', running);
   if (running && !timerHandle) { timerStart = Date.now(); tickTimer(); timerHandle = setInterval(tickTimer, 1000); }
@@ -108,18 +123,17 @@ let meterLevel = 0, meterQueued = false;
 function setMeter(level) {
   meterBars.forEach((b, i) => b.style.setProperty('--lv', Math.min(1, level * BAR_SHAPE[i]).toFixed(2)));
 }
-function feedMeter(block) {
-  let sum = 0;
-  for (let i = 0; i < block.length; i += 4) sum += block[i] * block[i];
-  const rms = Math.sqrt(sum / (block.length / 4));
-  meterLevel = Math.max(meterLevel * 0.8, Math.min(1, rms * 6));
+// rms: level of the last ~100 ms, computed on the audio thread.
+function feedMeter(rms) {
+  meterLevel = Math.max(meterLevel * 0.5, Math.min(1, rms * 6));
   if (!meterQueued) { meterQueued = true; requestAnimationFrame(() => { meterQueued = false; setMeter(meterLevel); }); }
 }
 
 // --- transcript: chat bubbles (expanded) + chips (compact) ---
 const WHO_LABEL = { them: 'Entrevistador', me: 'Tú' };
 const MEETING_WHO_LABEL = { them: 'Otros', me: 'Tú' };
-const whoLabel = (who) => (isMeeting() ? MEETING_WHO_LABEL : WHO_LABEL)[who];
+const CLASS_WHO_LABEL = { them: 'Clase', me: 'Tú' };
+const whoLabel = (who) => (isClass() ? CLASS_WHO_LABEL : isMeeting() ? MEETING_WHO_LABEL : WHO_LABEL)[who];
 let bubbles = [];                          // [{who, el, txt, whoEl}]
 const openBubble = { them: null, me: null }; // bubble still receiving finals
 const interimEl = { them: null, me: null };
@@ -167,6 +181,7 @@ function addTrColumn(msg) {
   return msg;
 }
 function addFinal(who, text) {
+  if (!window.Question.isBackchannel(text)) noteSpeech();
   dropInterim(who);
   txEmpty(false);
   let b = openBubble[who];
@@ -235,12 +250,12 @@ function translateBubble(b) {
   return b.trPromise;
 }
 // bubble: the phrase that was answered (local answers); else the latest one.
-function markQuestion(who, bubble) {
+function markQuestion(who, bubble, reply) {
   for (let i = bubbles.length - 1; i >= 0; i--) {
     const b = bubbles[i];
     if (b.who !== who || (bubble && b !== bubble)) continue;
     if (!b.whoEl.querySelector('.q')) {
-      const q = document.createElement('span'); q.className = 'q'; q.textContent = isMeeting() ? ' · Nota' : ' · Pregunta detectada';
+      const q = document.createElement('span'); q.className = 'q'; q.textContent = isMeeting() && !reply ? ' · Nota' : ' · Pregunta detectada';
       b.whoEl.appendChild(q);
     }
     return;
@@ -254,10 +269,17 @@ let view = -1;      // index of the answer on screen
 let autoAnswer = true;   // interviewer: answer each phrase automatically
 let mineAnswers = true;  // also answer the questions *you* ask (microphone)
 let manualPending = false;
-try {
-  autoAnswer = localStorage.getItem('autoAnswer') !== 'off';
-  mineAnswers = localStorage.getItem('mineAnswers') !== 'off';
-} catch (_) {}
+// "Mis preguntas / Mis frases" is remembered per mode: on by default in
+// interviews, off in meetings and classes (the mic also picks up the room).
+const mineKey = () => (isMeeting() ? 'mineAnswers.meeting' : 'mineAnswers');
+function loadMineAnswers() {
+  try {
+    const v = localStorage.getItem(mineKey());
+    mineAnswers = isMeeting() ? v === 'on' : v !== 'off';
+  } catch (_) { mineAnswers = !isMeeting(); }
+}
+try { autoAnswer = localStorage.getItem('autoAnswer') !== 'off'; } catch (_) {}
+loadMineAnswers();
 
 // Gateway output is capped by tokens; keep the configured character limit too.
 function limitChars(text) {
@@ -269,7 +291,12 @@ function limitChars(text) {
   return (sp >= room * 0.65 ? cut.slice(0, sp) : cut).trimEnd() + '…';
 }
 // Screenshot answers may carry code: they are not cut to the spoken-answer limit.
-const answerText = (a) => (a.mode === 'screenshot' ? String(a.text || '').trim() : limitChars(a.text));
+// Suggested answers in meetings ("💬 Respuesta:" + bullets) drop the label and
+// are not cut either: the prompt already bounds them.
+const answerText = (a) => (a.mode === 'screenshot' ? String(a.text || '').trim()
+  : isMeeting() && window.Notes.isReply(a.text) ? window.Notes.replyBody(a.text)
+  : limitChars(a.text));
+const isMeetingReply = (a) => a.mode === 'reply' || (isMeeting() && window.Notes.isReply(a.text));
 // Paragraph lines -> <p>, "• "/"- " lines -> one <ul> per run of bullets,
 // ``` fenced blocks -> <pre> (code from screenshot answers).
 function formatAnswer(target, text) {
@@ -294,7 +321,9 @@ function formatAnswer(target, text) {
     }
   }
 }
-const ansEmpty = () => (isMeeting()
+const ansEmpty = () => (isClass()
+  ? 'Las notas de la clase (ideas principales, ejemplos, tareas) aparecerán aquí. Pulsa 📝 Resumir al terminar.'
+  : isMeeting()
   ? 'Las notas (ideas, pendientes, decisiones) aparecerán aquí mientras conversan. Pulsa 📝 Resumir al terminar.'
   : 'Las sugerencias aparecerán aquí cuando el entrevistador haga una pregunta.');
 function renderAnswer() {
@@ -317,7 +346,7 @@ function renderAnswer() {
   const t = a.text.trim();
   if (t.length < 3 || isNoAnswer(t)) { ansEl.textContent = 'Pensando…'; ansEl.classList.add('empty'); }
   else { formatAnswer(ansEl, answerText(a)); ansEl.classList.remove('empty'); }
-  const label = a.mode === 'screenshot' ? 'Sugerencia (captura)' : isMeeting()
+  const label = a.mode === 'screenshot' ? 'Sugerencia (captura)' : isMeetingReply(a) ? 'Respuesta sugerida' : isMeeting()
     ? (a.who === 'me' ? 'Nota (tú)' : 'Nota')
     : a.who === 'me' ? 'Tu pregunta' : a.mode === 'manual' ? 'Respuesta (manual)' : 'Respuesta (auto)';
   el('ansMeta').textContent = label + ' · ' + hhmm(a.time);
@@ -349,7 +378,42 @@ el('copyAns').onclick = async () => {
 // (suggest=auto) or on request (Suggest), and arrive on that source's socket:
 // start → delta* → end. A newer phrase cancels the one in flight; "—" means
 // "no answer needed". who: 'them' (interviewer) or 'me' (your own questions).
+// Suggestions for "Mm-hmm"/"Claro"-style acknowledgements, and for microphone
+// phrases that are just the interviewer's voice leaking through the speakers,
+// are dropped so they never replace the useful answer on screen.
+const ignoredSuggestions = new Set();
+function recentTheirText() {
+  const recent = bubbles.filter((b) => b.who === 'them').slice(-4).map((b) => b.text);
+  const live = interimEl.them && interimEl.them.querySelector('.txt');
+  if (live) recent.push(live.textContent);
+  return recent.join(' ');
+}
+const isEchoOfThem = (text) => window.Question.isEcho(text, recentTheirText());
+function skipSuggestion(who, transcript) {
+  if (!String(transcript || '').trim()) return false; // nothing to judge by
+  if (who === 'them' && manualPending) return false;  // you asked for it
+  if (window.Question.isBackchannel(transcript)) return true;
+  return who === 'me' && isEchoOfThem(transcript);
+}
+// Meeting / class notes: one line only, and none that repeats a recent note
+// or just restates an open item from the memory.
+function isRepeatedLiveNote(a) {
+  a.text = window.Notes.firstNote(a.text);
+  if (!a.text) return true;
+  const previous = answers.filter((x) => x !== a && x.done && x.mode !== 'screenshot' && x.mode !== 'reply').slice(-30).map((x) => x.text);
+  const kind = isClass() ? 'class' : 'meeting';
+  const open = (memory.items || []).filter((it) => !it.done && (it.kind || 'meeting') === kind).map((it) => it.text);
+  return window.Notes.isRepeatedNote(a.text, previous, open);
+}
 function onGatewaySuggestion(who, m) {
+  if (ignoredSuggestions.has(m.id)) {
+    if (m.status !== 'start' && m.status !== 'delta') ignoredSuggestions.delete(m.id);
+    return;
+  }
+  if (m.status === 'start' && skipSuggestion(who, m.transcript)) {
+    ignoredSuggestions.add(m.id);
+    return;
+  }
   if (m.status === 'start') {
     const followLatest = view === answers.length - 1;
     const mode = who === 'me' ? 'mine' : manualPending ? 'manual' : 'auto';
@@ -378,7 +442,13 @@ function onGatewaySuggestion(who, m) {
   if (m.status === 'end') {
     a.text = String(m.suggestion || a.text);
     if (isNoAnswer(a.text.trim())) { removeAnswer(a); if (who === 'them') setStatus('Sin pregunta'); return; }
-    markQuestion(who, a.bubble);
+    if (isMeeting() && a.mode !== 'screenshot') {
+      if (window.Notes.isReply(a.text)) a.mode = 'reply'; // a question to you: keep the whole answer
+      else if (isRepeatedLiveNote(a)) { removeAnswer(a); setStatus(idleStatus()); return; }
+    }
+    // The interviewer's matching phrase may only arrive after the echo started.
+    if (who === 'me' && isEchoOfThem(a.question)) { removeAnswer(a); setStatus(idleStatus()); return; }
+    markQuestion(who, a.bubble, a.mode === 'reply');
     scheduleSessionLog();
     setStatus(idleStatus());
     renderAnswer();
@@ -436,7 +506,9 @@ function applyAutoUi() {
   b.setAttribute('aria-pressed', String(autoAnswer));
   const name = isMeeting() ? 'Notas en vivo' : 'Auto respuesta';
   b.textContent = (autoAnswer ? '● ' : '○ ') + name;
-  b.title = isMeeting()
+  b.title = isClass()
+    ? 'Anotar automáticamente ideas principales, ejemplos y tareas de la clase'
+    : isMeeting()
     ? 'Anotar automáticamente ideas, pendientes y decisiones de lo que dicen los demás'
     : 'Responder automáticamente al terminar cada pregunta del entrevistador';
 }
@@ -461,7 +533,7 @@ function applyMineUi() {
 }
 el('mineBtn').onclick = () => {
   mineAnswers = !mineAnswers;
-  try { localStorage.setItem('mineAnswers', mineAnswers ? 'on' : 'off'); } catch (_) {}
+  try { localStorage.setItem(mineKey(), mineAnswers ? 'on' : 'off'); } catch (_) {}
   applyMineUi();
   if (sources.me) configureGateway(false, 'me');
   setStatus(isMeeting()
@@ -472,7 +544,7 @@ applyMineUi();
 
 // Ask for an answer now: close the phrase in progress, then request it.
 function answerNow() {
-  if (!sources.them) { setStatus(isMeeting() ? 'Activa 🖥 para escuchar la reunión' : 'Activa 🖥 para escuchar al entrevistador', true); return; }
+  if (!sources.them) { setStatus(isClass() ? 'Activa 🖥 para escuchar la clase' : isMeeting() ? 'Activa 🖥 para escuchar la reunión' : 'Activa 🖥 para escuchar al entrevistador', true); return; }
   conns.them.control('Finalize');
   setStatus('Pidiendo respuesta…', 'busy');
   if (isZh()) {
@@ -592,24 +664,25 @@ window.api.onScreenshotDelta((reqId, text) => {
 });
 
 // --- audio sources ---
+// The worklet hands over ready Int16 frames of SEND_SAMPLES (~200 ms) and a
+// level every ~100 ms: a handful of wake-ups per second instead of ~125.
+function recorderNode(ctx) {
+  return new AudioWorkletNode(ctx, 'recorder-worklet', {
+    processorOptions: { frameSamples: SEND_SAMPLES, levelSamples: SEND_SAMPLES / 2 },
+  });
+}
 // Worklet → 200 ms Int16 frames → its gateway connection (+ level meter).
 async function startPipeline(stream, conn) {
   const ctx = new AudioContext({ sampleRate: SR });
   await ctx.audioWorklet.addModule('recorder-worklet.js');
   const src = ctx.createMediaStreamSource(stream);
-  const node = new AudioWorkletNode(ctx, 'recorder-worklet');
+  const node = recorderNode(ctx);
   const silent = ctx.createGain();
   silent.gain.value = 0;
-  let pcm = new Float32Array(0);
   node.port.onmessage = (ev) => {
-    const block = ev.data;
-    feedMeter(block);
-    const merged = new Float32Array(pcm.length + block.length);
-    merged.set(pcm, 0); merged.set(block, pcm.length); pcm = merged;
-    while (pcm.length >= SEND_SAMPLES) {
-      conn.send(toInt16(pcm.slice(0, SEND_SAMPLES)).buffer);
-      pcm = pcm.slice(SEND_SAMPLES);
-    }
+    const m = ev.data;
+    if (m.pcm) conn.send(m.pcm);
+    else if (m.level != null) feedMeter(m.level);
   };
   src.connect(node);
   node.connect(silent).connect(ctx.destination);
@@ -652,7 +725,7 @@ function setSourceUi(who, on) {
 async function startSource(who) {
   if (who === 'them' && isZh()) {
     if (!dgKey) { setStatus('Modo chino: falta DEEPGRAM_API_KEY en el archivo .env', true); return; }
-  } else if (!sttKey) { setStatus('Falta STT_TOKEN en el archivo .env', true); return; }
+  } else if (!sttKey) { setStatus('Falta STT_TOKEN: ⚙ Configuración > Cargar archivo de claves', true); return; }
   let stream = null;
   try {
     if (who === 'them') {
@@ -739,15 +812,37 @@ el('micBtn').onclick = () => (sources.me ? stopSource('me').then(() => setStatus
 // --- mode: interview <-> meeting ---
 function applyModeUi() {
   appEl.classList.toggle('meeting', isMeeting());
+  appEl.classList.toggle('class-mode', isClass());
   el('modeSel').value = appMode;
-  el('sysBtn').title = isMeeting() ? 'Escuchar a los demás (audio del sistema: Teams, Meet, Zoom…)' : 'Escuchar al entrevistador (audio del sistema)';
-  el('themLang').title = isMeeting() ? 'Idioma de los demás' : 'Idioma del entrevistador';
+  el('sysBtn').title = isClass() ? 'Escuchar la clase (audio del sistema: Zoom, Meet, Teams, YouTube…)'
+    : isMeeting() ? 'Escuchar a los demás (audio del sistema: Teams, Meet, Zoom…)' : 'Escuchar al entrevistador (audio del sistema)';
+  el('themLang').title = isClass() ? 'Idioma de la clase' : isMeeting() ? 'Idioma de los demás' : 'Idioma del entrevistador';
   const empty = txList.querySelector('.tx-empty');
-  if (empty) empty.textContent = isMeeting()
+  if (empty) empty.textContent = isClass()
+    ? 'Pulsa 🖥 para escuchar la clase (audio del sistema) y 🎙 para tus preguntas o una clase presencial.'
+    : isMeeting()
     ? 'Pulsa 🖥 para escuchar la reunión (audio del sistema) y 🎙 para tu voz o una conversación en persona.'
     : 'Pulsa 🖥 para escuchar al entrevistador y 🎙 para tu voz.';
   el('ansPane').setAttribute('aria-label', isMeeting() ? 'Notas en vivo' : 'Respuesta sugerida');
-  el('endMeetingBtn').title = isMeeting()
+  el('summarizeBtn').title = isClass()
+    ? 'Resumir la clase: ideas principales, ejemplos y tareas (se guarda en la memoria)'
+    : 'Resumir la conversación: ideas, pendientes y próximos pasos (se guarda en la memoria)';
+  el('memBtn').title = isClass() ? 'Memoria: tareas y clases anteriores' : 'Memoria: pendientes y conversaciones anteriores';
+  el('memTitle').textContent = isClass() ? '🧠 Memoria de clases' : '🧠 Memoria de conversaciones';
+  el('memOpenTitle').textContent = isClass() ? 'Tareas abiertas' : 'Pendientes abiertos';
+  el('memPastTitle').firstChild.textContent = isClass() ? 'Clases anteriores ' : 'Conversaciones anteriores ';
+  el('memSummarize').textContent = isClass() ? '📝 Resumir clase actual' : '📝 Resumir conversación actual';
+  el('memPlan').textContent = isClass() ? '📚 Plan de estudio' : '💡 Proponer próximos pasos';
+  el('memPlan').title = isClass() ? 'Arma un plan de estudio: tareas urgentes, qué repasar y preguntas de autoevaluación'
+    : 'Propone próximos pasos e iniciativas a partir de la memoria';
+  el('meetingContextLabel').firstChild.textContent = isClass() ? 'Contexto de la clase ' : 'Contexto de las conversaciones ';
+  el('meetingContext').placeholder = isClass()
+    ? 'Ej.: Cálculo I, prof. Pérez — unidad de derivadas / curso online de Python, módulo 3…'
+    : 'Ej.: reunión semanal del equipo de producto (Ana, Luis y yo) / grupo de amigos planeando un viaje…';
+  el('meetingDocumentsLabel').firstChild.textContent = isClass() ? 'Material de la clase ' : 'Documentos relevantes ';
+  el('endMeetingBtn').title = isClass()
+    ? 'Terminar la clase: recoge las últimas frases, deja de escuchar, resume y guarda en la memoria'
+    : isMeeting()
     ? 'Terminar la reunión: recoge las últimas frases, deja de escuchar, resume y guarda en la memoria'
     : 'Terminar la entrevista: recoge las últimas frases, deja de escuchar y guarda el log en el historial';
   applyAutoUi();
@@ -755,18 +850,22 @@ function applyModeUi() {
   renderAnswer();
 }
 el('modeSel').onchange = async () => {
-  const next = el('modeSel').value === 'meeting' ? 'meeting' : 'interview';
+  const next = APP_MODES.includes(el('modeSel').value) ? el('modeSel').value : 'interview';
   if (next === appMode) return;
   appMode = await window.api.setMode(next);
+  loadMineAnswers();
   applyModeUi();
   el('memPanel').hidden = true;
   // New rules + context for the live connections; forget previous turns.
   configureGateway(true);
-  setStatus(isMeeting() ? 'Modo reunión: notas en vivo, resumen y memoria' : 'Modo entrevista');
+  setStatus(isClass() ? 'Modo clase: ideas principales, ejemplos, tareas y resumen'
+    : isMeeting() ? 'Modo reunión: notas en vivo, resumen y memoria' : 'Modo entrevista');
 };
 
 // --- memory panel (meeting mode) ---
 let memory = { meetings: [], items: [] };
+// Loaded now too: live notes compare against the open items (see Notes).
+window.api.getMemory().then((m) => { if (m && Array.isArray(m.items)) memory = m; }).catch(() => {});
 const dayLabel = (iso) => {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('es-CL', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -796,9 +895,20 @@ function folderButton(folder) {
   b.onclick = () => openFolder(folder);
   return b;
 }
-const itemLabel = (it) => it.text + (it.owner ? ' — ' + it.owner : '');
+const itemLabel = (it) => it.text + (it.owner ? ' — ' + it.owner : '') + (it.due ? ' (entrega: ' + it.due + ')' : '');
 // Meeting summary (fresh result or a stored meeting) into target.
 function renderMeetingBody(target, m, newItems, resolvedItems) {
+  if (m.kind === 'class') {
+    if (m.summary) { target.appendChild(mk('h4', null, 'Resumen')); target.appendChild(mk('p', null, m.summary)); }
+    addList(target, 'Ideas principales', m.ideas);
+    addList(target, 'Ejemplos', m.examples);
+    addList(target, 'Tareas', newItems, itemLabel);
+    addList(target, 'Tareas anteriores cerradas', resolvedItems, itemLabel);
+    addList(target, 'Para repasar', m.nextSteps);
+    addList(target, 'Dudas para la próxima clase', m.questions);
+    addList(target, 'Temas', m.topics);
+    return;
+  }
   if (m.summary) { target.appendChild(mk('h4', null, 'Resumen')); target.appendChild(mk('p', null, m.summary)); }
   addList(target, 'Ideas', m.ideas);
   addList(target, 'Decisiones', m.decisions);
@@ -834,8 +944,36 @@ function formatPlan(target, text) {
     }
   }
 }
+// Export buttons (Word / PDF) for a saved session id.
+function exportButtons(id, onStatus) {
+  const wrap = mk('span', 'export-btns');
+  for (const [fmt, label] of [['docx', '📄 Word'], ['pdf', '📕 PDF']]) {
+    const b = mk('button', 'small', label);
+    b.type = 'button';
+    b.title = fmt === 'pdf' ? 'Exportar todo (resumen, ideas, tareas, ejemplos, transcripción) a PDF' : 'Exportar todo (resumen, ideas, tareas, ejemplos, transcripción) a Word';
+    b.onclick = () => exportSession(id, fmt, b, onStatus);
+    wrap.appendChild(b);
+  }
+  return wrap;
+}
+async function exportSession(id, fmt, btn, onStatus) {
+  const say = onStatus || ((msg, err) => setStatus(msg, err));
+  if (!id) { say('No hay sesión guardada para exportar', true); return; }
+  if (btn) btn.disabled = true;
+  say(fmt === 'pdf' ? 'Exportando a PDF…' : 'Exportando a Word…');
+  let r;
+  try { r = await window.api.historyExport(id, fmt); } catch (err) { r = { ok: false, error: err.message || String(err) }; }
+  if (btn) btn.disabled = false;
+  if (r && r.canceled) { say(''); return; }
+  if (!r || !r.ok) { say('No se pudo exportar: ' + (r && r.error || 'error'), true); return; }
+  say('✓ Exportado: ' + r.file.split(/[\\/]/).pop());
+}
+const folderId = (folder) => String(folder || '').split(/[\\/]/).pop();
+
 function renderMemory() {
-  const items = memory.items || [];
+  const kind = memKind();
+  const cls = kind === 'class';
+  const items = (memory.items || []).filter((it) => (it.kind || 'meeting') === kind);
   const open = items.filter((it) => !it.done);
   const done = items.filter((it) => it.done).slice(-30).reverse();
   const row = (it) => {
@@ -850,30 +988,33 @@ function renderMemory() {
     if (sub) txt.appendChild(mk('span', 'mem-sub', sub));
     const del = mk('button', null, '✕');
     del.type = 'button';
-    del.title = 'Eliminar pendiente';
-    del.setAttribute('aria-label', 'Eliminar pendiente');
+    del.title = cls ? 'Eliminar tarea' : 'Eliminar pendiente';
+    del.setAttribute('aria-label', del.title);
     del.onclick = async () => { memory = await window.api.removeMemoryItem(it.id); renderMemory(); configureGateway(false); };
     li.append(cb, txt, del);
     return li;
   };
-  el('memOpen').replaceChildren(...(open.length ? open.map(row) : [mk('li', 'mem-empty', 'Sin pendientes abiertos.')]));
+  el('memOpen').replaceChildren(...(open.length ? open.map(row) : [mk('li', 'mem-empty', cls ? 'Sin tareas abiertas.' : 'Sin pendientes abiertos.')]));
   el('memDone').replaceChildren(...done.map(row));
   el('memDoneLabel').textContent = 'Completados (' + items.filter((it) => it.done).length + ')';
 
-  const meetings = (memory.meetings || []).slice().reverse();
+  const meetings = (memory.meetings || []).filter((m) => (m.kind || 'meeting') === kind).reverse();
   const wrap = el('memMeetings');
   wrap.replaceChildren();
-  if (!meetings.length) wrap.appendChild(mk('div', 'mem-empty', 'Aún no hay conversaciones resumidas. Escucha una conversación y pulsa 📝 Resumir.'));
+  if (!meetings.length) wrap.appendChild(mk('div', 'mem-empty', cls
+    ? 'Aún no hay clases resumidas. Escucha una clase y pulsa 📝 Resumir.'
+    : 'Aún no hay conversaciones resumidas. Escucha una conversación y pulsa 📝 Resumir.'));
   for (const m of meetings) {
     const d = mk('details', 'mem-meeting');
     const sum = mk('summary', null, m.title || 'Conversación');
     sum.appendChild(mk('span', 'muted', dayLabel(m.startedAt)));
     const body = mk('div', 'mem-result');
     renderMeetingBody(body, m, (memory.items || []).filter((it) => it.meetingId === m.id), null);
+    const untitled = cls ? 'Clase' : 'Conversación';
     const del = mk('button', 'small mem-del', 'Eliminar de la memoria');
     del.type = 'button';
     del.onclick = async () => {
-      if (!confirm('¿Eliminar «' + (m.title || 'Conversación') + '» y sus pendientes de la memoria? No se puede deshacer.')) return;
+      if (!confirm('¿Eliminar «' + (m.title || untitled) + '» y sus ' + (cls ? 'tareas' : 'pendientes') + ' de la memoria? No se puede deshacer.')) return;
       memory = await window.api.removeMemoryMeeting(m.id);
       renderMemory();
       configureGateway(false);
@@ -885,11 +1026,14 @@ function renderMemory() {
       h.onclick = () => openHistory(m.folder.split(/[\\/]/).pop());
       d.appendChild(h);
       d.appendChild(folderButton(m.folder));
+      d.appendChild(exportButtons(folderId(m.folder)));
     }
     d.appendChild(del);
     wrap.appendChild(d);
   }
-  el('memInfo').textContent = open.length + ' pendiente' + (open.length === 1 ? '' : 's') + ' · ' + meetings.length + ' conversaci' + (meetings.length === 1 ? 'ón' : 'ones');
+  el('memInfo').textContent = cls
+    ? open.length + ' tarea' + (open.length === 1 ? '' : 's') + ' abierta' + (open.length === 1 ? '' : 's') + ' · ' + meetings.length + ' clase' + (meetings.length === 1 ? '' : 's')
+    : open.length + ' pendiente' + (open.length === 1 ? '' : 's') + ' · ' + meetings.length + ' conversaci' + (meetings.length === 1 ? 'ón' : 'ones');
 }
 async function openMemPanel() {
   if (isCompact()) setLayout('expanded');
@@ -906,12 +1050,12 @@ let summarizing = false;
 async function summarizeConversation() {
   if (summarizing) return;
   const snap = sessionSnapshot();
-  if (!snap || !snap.transcript.length) { setStatus('No hay conversación para resumir todavía', true); return false; }
+  if (!snap || !snap.transcript.length) { setStatus(isClass() ? 'No hay clase para resumir todavía' : 'No hay conversación para resumir todavía', true); return false; }
   summarizing = true;
   el('summarizeBtn').disabled = el('memSummarize').disabled = true;
   if (el('memPanel').hidden) await openMemPanel();
-  showMemResult('Resumiendo la conversación y actualizando pendientes…');
-  setStatus('Resumiendo conversación…', 'busy');
+  showMemResult(isClass() ? 'Resumiendo la clase: ideas principales, ejemplos y tareas…' : 'Resumiendo la conversación y actualizando pendientes…');
+  setStatus(isClass() ? 'Resumiendo clase…' : 'Resumiendo conversación…', 'busy');
   let r;
   try { r = await window.api.summarizeMeeting(snap); } catch (err) { r = { ok: false, error: err.message || String(err) }; }
   summarizing = false;
@@ -926,7 +1070,10 @@ async function summarizeConversation() {
   showMemResult((box) => {
     box.appendChild(mk('div', 'mem-title', '📝 ' + r.meeting.title));
     renderMeetingBody(box, r.meeting, r.newItems, r.resolvedItems);
-    if (r.meeting.folder) box.appendChild(folderButton(r.meeting.folder));
+    if (r.meeting.folder) {
+      box.appendChild(folderButton(r.meeting.folder));
+      box.appendChild(exportButtons(folderId(r.meeting.folder)));
+    }
   });
   configureGateway(false); // live notes now know the updated pending items
   setStatus('Resumen guardado en la memoria');
@@ -950,7 +1097,7 @@ let endingMeeting = false;
 async function endMeeting() {
   if (endingMeeting || summarizing) return;
   const meeting = isMeeting();
-  if (!running && !bubbles.some((b) => b.text)) { setStatus(meeting ? 'No hay reunión en curso' : 'No hay entrevista en curso', true); return; }
+  if (!running && !bubbles.some((b) => b.text)) { setStatus(isClass() ? 'No hay clase en curso' : meeting ? 'No hay reunión en curso' : 'No hay entrevista en curso', true); return; }
   endingMeeting = true;
   const btn = el('endMeetingBtn');
   btn.disabled = true;
@@ -974,8 +1121,9 @@ async function endMeeting() {
       setStatus('No se pudo resumir: la conversación sigue en pantalla, reintenta con 📝 Resumir', true);
       return;
     }
+    const wasClass = isClass();
     await clearAll();
-    setStatus('Reunión terminada · resumen guardado en 🧠 Memoria');
+    setStatus((wasClass ? 'Clase terminada' : 'Reunión terminada') + ' · resumen guardado en 🧠 Memoria (exporta a Word/PDF desde ahí)');
   } finally {
     endingMeeting = false;
     btn.disabled = false;
@@ -985,12 +1133,12 @@ async function endMeeting() {
 async function proposeNextSteps() {
   const btn = el('memPlan');
   btn.disabled = true;
-  showMemResult('Pensando próximos pasos e iniciativas…');
+  showMemResult(isClass() ? 'Armando el plan de estudio…' : 'Pensando próximos pasos e iniciativas…');
   let r;
   try { r = await window.api.proposeInitiatives(); } catch (err) { r = { ok: false, error: err.message || String(err) }; }
   btn.disabled = false;
   if (!r || !r.ok) { showMemResult('No se pudo generar la propuesta: ' + (r && r.error || 'error'), true); return; }
-  showMemResult((box) => { box.appendChild(mk('div', 'mem-title', '💡 Cómo seguir')); formatPlan(box, r.text); });
+  showMemResult((box) => { box.appendChild(mk('div', 'mem-title', isClass() ? '📚 Plan de estudio' : '💡 Cómo seguir')); formatPlan(box, r.text); });
 }
 
 el('memBtn').onclick = openMemPanel;
@@ -1003,7 +1151,10 @@ el('memFolders').onclick = () => openFolder('');
 
 // --- history panel: browse saved sessions (one folder per conversation) ---
 const TRANSCRIPT_TAB = 'transcripcion.md';
-const HIST_TABS = { 'resumen.md': 'Resumen', 'pendientes.md': 'Pendientes', 'ideas.md': 'Ideas', 'proximos-pasos.md': 'Próximos pasos', 'transcripcion.md': 'Transcripción' };
+const HIST_TABS = { 'resumen.md': 'Resumen', 'pendientes.md': 'Pendientes', 'tareas.md': 'Tareas', 'ideas.md': 'Ideas', 'ejemplos.md': 'Ejemplos', 'proximos-pasos.md': 'Próximos pasos', 'transcripcion.md': 'Transcripción' };
+const CLASS_HIST_TABS = { 'ideas.md': 'Ideas principales', 'proximos-pasos.md': 'Para repasar' };
+const MODE_BADGE = { interview: 'Entrevista', meeting: 'Reunión', class: 'Clase' };
+const histTabLabel = (f) => (histDoc && histDoc.info.mode === 'class' && CLASS_HIST_TABS[f]) || HIST_TABS[f] || f;
 let histSessions = [], histSelected = '', histCurrent = '', histDoc = null, histTab = '', histSearchTimer = null;
 
 // Inline **bold** and _italic_ as DOM nodes (never innerHTML).
@@ -1071,7 +1222,7 @@ function renderHistList() {
     b.setAttribute('aria-selected', String(s.id === histSelected));
     b.appendChild(mk('span', 't', s.title));
     const d = mk('span', 'd', dateTimeLabel(s.startedAt));
-    if (s.mode) d.appendChild(mk('span', 'badge' + (s.mode === 'meeting' ? ' meeting' : ''), s.mode === 'meeting' ? 'Reunión' : 'Entrevista'));
+    if (s.mode) d.appendChild(mk('span', 'badge' + (s.mode !== 'interview' ? ' ' + s.mode : ''), MODE_BADGE[s.mode] || s.mode));
     if (s.mode !== 'interview' && !s.hasSummary) d.appendChild(mk('span', 'badge pending', 'sin resumen'));
     if (s.id === histCurrent) d.appendChild(mk('span', 'badge live', 'en curso'));
     b.appendChild(d);
@@ -1091,7 +1242,7 @@ function renderHistTab() {
   const tabs = el('histTabs');
   tabs.replaceChildren();
   for (const f of histDoc.info.files) {
-    const t = mk('button', null, HIST_TABS[f] || f);
+    const t = mk('button', null, histTabLabel(f));
     t.type = 'button';
     t.setAttribute('role', 'tab');
     t.setAttribute('aria-selected', String(f === histTab));
@@ -1119,6 +1270,25 @@ function splitAnswersTab(r) {
   r.info.files = files;
   return r;
 }
+// Questions the other side asked, with date and time, in their own tab
+// (placed before the transcript).
+const HIST_QUESTIONS_TAB = 'preguntas';
+HIST_TABS[HIST_QUESTIONS_TAB] = 'Preguntas';
+function addQuestionsTab(r) {
+  const qs = window.Question.extractQuestions(r.files[TRANSCRIPT_TAB]);
+  const files = r.info.files.filter((f) => f !== HIST_QUESTIONS_TAB);
+  if (qs.length) {
+    const dmy = (iso) => (iso ? iso.slice(8, 10) + '-' + iso.slice(5, 7) + '-' + iso.slice(0, 4) + ' ' : '');
+    r.files[HIST_QUESTIONS_TAB] = [
+      `## Preguntas realizadas (${qs.length})`, '',
+      ...qs.map((q) => `- **${dmy(q.date)}${q.time}** · ${q.who === 'Entrevistador' ? '' : q.who + ': '}${q.text}`),
+    ].join('\n');
+    const at = files.indexOf(TRANSCRIPT_TAB);
+    files.splice(at < 0 ? files.length : at, 0, HIST_QUESTIONS_TAB);
+  }
+  r.info.files = files;
+  return r;
+}
 async function selectHistory(id) {
   histSelected = id;
   renderHistList();
@@ -1126,7 +1296,7 @@ async function selectHistory(id) {
   const r = await window.api.historyRead(id);
   if (histSelected !== id) return;
   if (!r || !r.ok) { setHistStatus(r && r.error || 'No se pudo abrir', true); return; }
-  histDoc = splitAnswersTab(r);
+  histDoc = addQuestionsTab(splitAnswersTab(r));
   const info = r.info;
   el('histEmpty').hidden = true;
   el('histView').hidden = false;
@@ -1137,6 +1307,8 @@ async function selectHistory(id) {
   el('histSummarize').textContent = info.hasSummary ? '↻ Volver a resumir' : '📝 Resumir';
   el('histSummarize').title = info.kind === 'file'
     ? 'Resume esta conversación (el log se mueve a su propia carpeta)'
+    : info.mode === 'class'
+    ? 'Genera resumen, ideas principales, ejemplos y tareas, y lo guarda en la memoria'
     : 'Genera resumen, pendientes, ideas y próximos pasos, y lo guarda en la memoria';
   if (!info.files.includes(histTab)) histTab = info.files.includes('resumen.md') ? 'resumen.md' : info.files[0];
   renderHistTab();
@@ -1160,6 +1332,8 @@ el('memHistory').onclick = () => openHistory('');
 el('histClose').onclick = closeHistory;
 el('histFolders').onclick = () => openFolder('');
 el('histOpen').onclick = () => { if (histDoc) openFolder(histDoc.info.path); };
+el('histWord').onclick = () => { if (histDoc) exportSession(histDoc.info.id, 'docx', el('histWord'), setHistStatus); };
+el('histPdf').onclick = () => { if (histDoc) exportSession(histDoc.info.id, 'pdf', el('histPdf'), setHistStatus); };
 el('histSearch').oninput = () => {
   clearTimeout(histSearchTimer);
   histSearchTimer = setTimeout(() => loadHistory(el('histSearch').value), 250);
@@ -1206,7 +1380,9 @@ function pushSessionLog() {
   if (snap) window.api.updateTranscriptLog(snap);
 }
 function scheduleSessionLog() {
-  if (!logTimer) logTimer = setTimeout(pushSessionLog, 1000);
+  // The snapshot carries the whole transcript: in long meetings sending it
+  // every second was wasted work (main only writes it every 20 s).
+  if (!logTimer) logTimer = setTimeout(pushSessionLog, 3000);
 }
 window.addEventListener('beforeunload', pushSessionLog);
 
@@ -1361,10 +1537,70 @@ function renderMeetingDocuments() {
     : 'Sin documentos agregados.';
 }
 function closeCtxPanel() { el('ctxPanel').hidden = true; el('settings').focus(); }
+
+// --- transparency (0–90 %): live, saved immediately (not tied to Guardar) ---
+function showTransparency(v) {
+  el('transparency').value = v;
+  el('transparencyValue').textContent = v + '%';
+  el('transparency').setAttribute('aria-valuetext', v + ' % de transparencia');
+}
+el('transparency').oninput = () => {
+  const v = Number(el('transparency').value) || 0;
+  showTransparency(v);
+  window.api.setTransparency(v);
+};
+
+// --- transcripts folder picker ---
+function showKeysInfo(info, msg, kind) {
+  if (!info) return;
+  el('keysPath').textContent = info.present ? info.path : 'Sin archivo de claves';
+  el('keysPath').title = info.path;
+  el('keysMsg').textContent = msg || (info.missing.length
+    ? 'Faltan ' + info.missing.join(' y ') + '. Carga el archivo claves.env que te entregaron (no lo compartas).'
+    : 'Claves configuradas. Para cambiarlas, carga otro archivo claves.env.');
+  el('keysMsg').className = 'hint-text' + (kind ? ' ' + kind : info.missing.length ? ' err' : '');
+}
+el('keysImport').onclick = async () => {
+  const r = await window.api.importKeys();
+  if (!r || r.canceled) return;
+  if (r.ok) showKeysInfo(r, '✓ Claves cargadas. Reiniciando la ventana…', 'ok');
+  else showKeysInfo(r, 'No se pudo cargar: ' + (r.error || 'error'), 'err');
+};
+function showConfInfo(info) {
+  if (!info) return;
+  el('confFilePath').textContent = info.path;
+  el('confFilePath').title = info.path;
+  const warn = Array.isArray(info.warnings) && info.warnings.length;
+  el('confFileMsg').textContent = warn
+    ? 'Algunas líneas de asistente.conf no se pudieron usar: ' + info.warnings.slice(0, 3).join(' · ')
+    : 'asistente.conf guarda todo lo de este panel: se lee al abrir la app y se actualiza al guardar. Puedes copiarlo a otro usuario o editarlo a mano.';
+  el('confFileMsg').className = 'hint-text' + (warn ? ' err' : '');
+}
+el('confFileShow').onclick = () => window.api.revealConf();
+function showLogDir(info, msg, isErr) {
+  if (!info) return;
+  el('logDirPath').textContent = info.path;
+  el('logDirPath').title = info.path;
+  el('logDirReset').hidden = !info.custom;
+  if (msg !== undefined) {
+    el('logDirMsg').textContent = msg;
+    el('logDirMsg').className = 'hint-text' + (isErr ? ' err' : '');
+  }
+}
+el('logDirPick').onclick = async () => {
+  const r = await window.api.pickLogDir();
+  if (r.canceled) return;
+  showLogDir(r, r.ok ? '✓ Las nuevas sesiones se guardarán aquí.' : r.error, !r.ok);
+};
+el('logDirReset').onclick = async () => {
+  const r = await window.api.resetLogDir();
+  showLogDir(r, '✓ Volviste a la ubicación predeterminada.');
+};
 el('settings').onclick = async () => {
   if (isCompact()) setLayout('expanded'); // the panel needs the full window
   const c = await window.api.getContext();
   el('meetingContext').value = c.meetingContext || '';
+  el('userName').value = c.userName || '';
   meetingDocuments = Array.isArray(c.meetingDocuments) ? c.meetingDocuments.map((doc) => ({ name: doc.name, text: doc.text })) : [];
   renderMeetingDocuments();
   el('memPanel').hidden = true;
@@ -1374,8 +1610,16 @@ el('settings').onclick = async () => {
   el('responseChars').value = c.responseChars || 500;
   const responseFormat = c.responseFormat === 'paragraph' ? 'paragraph' : 'bullets';
   document.querySelector(`input[name="responseFormat"][value="${responseFormat}"]`).checked = true;
-  el('responseInstructions').value = c.responseInstructions || '';
+  // One instructions field per mode; the textarea edits the current one.
+  instructionsDraft = { interview: c.responseInstructions || '', meeting: c.meetingInstructions || '', class: c.classInstructions || '' };
+  el('responseInstructions').value = instructionsDraft[appMode] || '';
+  el('responseInstructionsLabel').firstChild.textContent = 'Instrucciones adicionales para ' + INSTRUCTIONS_FOR[appMode] + ' ';
   el('shareInterfaceVisible').checked = c.shareInterfaceVisible === true;
+  showTransparency(Number(c.transparency) || 0);
+  showConfInfo(await window.api.confInfo());
+  showKeysInfo(await window.api.keysInfo());
+  showLogDir(await window.api.logDirInfo(),
+    'Se crea una carpeta «transcripciones» dentro de la que elijas. La sesión en curso sigue en su carpeta actual.');
   ctxInfoText();
   el('ctxPanel').hidden = false;
   (isMeeting() ? el('meetingContext') : el('jd')).focus();
@@ -1385,17 +1629,23 @@ el('ctxCancel').onclick = closeCtxPanel;
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !el('ctxPanel').hidden) { ev.preventDefault(); closeCtxPanel(); }
 });
+const INSTRUCTIONS_FOR = { interview: 'entrevistas', meeting: 'reuniones', class: 'clases' };
+let instructionsDraft = { interview: '', meeting: '', class: '' };
 el('ctxSave').onclick = async () => {
   const charsInput = el('responseChars');
+  instructionsDraft[appMode] = el('responseInstructions').value;
   if (!charsInput.checkValidity()) { charsInput.reportValidity(); return; }
   const r = await window.api.saveContext({
     meetingContext: el('meetingContext').value,
+    userName: el('userName').value,
     meetingDocuments,
     cv: el('cv').value,
     jd: el('jd').value,
     responseChars: charsInput.value,
     responseFormat: document.querySelector('input[name="responseFormat"]:checked').value,
-    responseInstructions: el('responseInstructions').value,
+    responseInstructions: instructionsDraft.interview,
+    meetingInstructions: instructionsDraft.meeting,
+    classInstructions: instructionsDraft.class,
     shareInterfaceVisible: el('shareInterfaceVisible').checked,
   });
   if (r && r.ok) applyCaptureUi(r.shareInterfaceVisible === true);
@@ -1491,9 +1741,9 @@ function renderPracticeAnswer() {
   el('practiceAnswer').textContent = text || 'Escuchando…';
 }
 
-function practiceOnBlock(block) {
-  if (!practiceRecording) return;
-  window.DG.send(toInt16(block).buffer);
+function practiceOnBlock(m) {
+  if (!practiceRecording || !m.pcm) return;
+  window.DG.send(m.pcm);
 }
 
 async function startPracticeMic() {
@@ -1519,7 +1769,7 @@ async function startPracticeMic() {
     practiceCtx = new AudioContext({ sampleRate: SR });
     await practiceCtx.audioWorklet.addModule('recorder-worklet.js');
     practiceSource = practiceCtx.createMediaStreamSource(practiceStream);
-    practiceNode = new AudioWorkletNode(practiceCtx, 'recorder-worklet');
+    practiceNode = recorderNode(practiceCtx);
     const silent = practiceCtx.createGain();
     silent.gain.value = 0;
     practiceNode.port.onmessage = (event) => practiceOnBlock(event.data);
@@ -1726,10 +1976,12 @@ el('practiceAgain').onclick = () => {
   if (!c.hasKey) missing.push('IAMIKO_TOKEN');
   if (!sttKey) missing.push('STT_TOKEN');
   const ctx = await window.api.getContext();
-  appMode = ctx.mode === 'meeting' ? 'meeting' : 'interview';
+  appMode = APP_MODES.includes(ctx.mode) ? ctx.mode : 'interview';
+  loadMineAnswers();
   applyModeUi();
   applyCaptureUi(ctx.shareInterfaceVisible === true);
-  if (missing.length) setStatus('Falta configurar ' + missing.join(' y ') + ' en el archivo .env', true);
+  if (missing.length) setStatus('Faltan claves (' + missing.join(' y ') + '): ⚙ Configuración > Cargar archivo de claves', true);
+  else if (isClass()) setStatus('Modo clase — pulsa 🖥 para escuchar la clase');
   else if (isMeeting()) setStatus('Modo reunión — pulsa 🖥 o 🎙 para escuchar');
   else if (!(ctx.cv || ctx.jd)) setStatus('Añade tu CV y el cargo en ⚙ Configuración, luego pulsa 🖥');
   else setStatus('Listo — pulsa 🖥 para escuchar');

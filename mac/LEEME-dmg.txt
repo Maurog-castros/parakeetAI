@@ -1,0 +1,25 @@
+ParakeetAI para Mac — instalación sin terminal
+==============================================
+
+1) Arrastra ParakeetAI.app a la carpeta Aplicaciones (en esta misma ventana).
+
+2) Ábrela desde Aplicaciones. La primera vez macOS dirá que no puede verificar
+   al desarrollador. Pulsa "Aceptar" y luego:
+   Ajustes del Sistema > Privacidad y seguridad > (abajo) "Abrir igualmente".
+   Solo se hace una vez.
+
+3) Permisos: cuando pulses 🖥 (audio del sistema) o 🎙 (micrófono), acepta los
+   avisos. Si 🖥 da error de permiso: Ajustes del Sistema > Privacidad y
+   seguridad > Grabación de pantalla y audio del sistema > activa ParakeetAI
+   y vuelve a abrir la app.
+
+4) Claves de acceso: abre ⚙ Configuración > "Cargar archivo de claves…" y elige
+   el archivo claves.env que te entregaron. No lo compartas con nadie.
+
+5) Configuración (opcional): si te entregaron un asistente.conf, cópialo en
+   Documentos/ParakeetAI/ antes de abrir la app (o con la app abierta, y luego
+   abre ⚙ Configuración para que lo recargue).
+
+Qué elegir: ParakeetAI-arm64.dmg para Mac con chip Apple (M1, M2, M3, M4…),
+ParakeetAI-x64.dmg para Mac con procesador Intel.
+(Menú  > Acerca de este Mac: "Chip Apple" o "Procesador Intel".)

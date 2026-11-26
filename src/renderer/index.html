@@ -14,7 +14,7 @@
   html, body { margin:0; height:100%; font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; color:var(--fg); }
   body { background: transparent; }
   #app { position:relative; height:100vh; display:flex; flex-direction:column; background:var(--bg);
-         border:1px solid var(--line-strong); border-radius:14px; overflow:hidden; backdrop-filter: blur(10px); }
+         border:1px solid var(--line-strong); border-radius:14px; overflow:hidden; }
 
   /* --- toolbar (drag handle) --- */
   #toolbar { display:flex; align-items:center; gap:6px; padding:6px 8px;
@@ -28,8 +28,9 @@
   button.src:hover { color:var(--fg); background:rgba(255,255,255,.08); border-color:transparent; }
   button.src .src-dot { position:absolute; top:3px; right:4px; width:8px; height:8px; border-radius:50%; background:transparent; }
   button.src.on { color:var(--fg); }
-  button.src.on .src-dot { background:#ff8a3d; box-shadow:0 0 0 2px rgba(255,138,61,.25); animation:pulseo 1.6s ease-in-out infinite; }
-  @keyframes pulseo { 50% { box-shadow:0 0 0 5px rgba(255,138,61,0); } }
+  /* Static dot: an endless pulse repainted the transparent window 60 times a
+     second for the whole meeting (noticeable on Macs). */
+  button.src.on .src-dot { background:#ff8a3d; box-shadow:0 0 0 2px rgba(255,138,61,.3); }
   button.tb { display:inline-flex; align-items:center; gap:6px; padding:4px 6px 4px 10px; font-size:12.5px; font-weight:600;
               background:rgba(255,255,255,.05); border-color:var(--line); white-space:nowrap; }
   button.tb kbd { font-weight:500; }
@@ -91,7 +92,8 @@
 
   .tx-list { flex:1; min-height:0; overflow:auto; display:flex; flex-direction:column; gap:10px; padding:10px; }
   .tx-empty { margin:auto; color:var(--dim); font-style:italic; font-size:12.5px; text-align:center; }
-  .msg { max-width:88%; display:flex; flex-direction:column; gap:3px; }
+  /* Long meetings pile up hundreds of messages: skip laying out the ones off screen. */
+  .msg { max-width:88%; display:flex; flex-direction:column; gap:3px; content-visibility:auto; contain-intrinsic-size:auto 52px; }
   .msg .txt { font-size:13px; line-height:1.45; color:#e3e7f0; }
   .msg .who { font-size:10.5px; color:var(--dim); }
   .msg.them { align-self:flex-start; }
@@ -172,9 +174,15 @@
   .ctx-row .spacer { flex:1; }
   #ctxPanel label.field { font-size:11.5px; font-weight:600; color:var(--fg); }
   .hint-text { font-size:11px; color:var(--mut); font-weight:400; }
-  #ctxPanel textarea { width:100%; resize:vertical; background:var(--card); color:var(--fg);
+  #transparency { flex:1; min-width:140px; accent-color:#6ea8fe; cursor:pointer; }
+  #transparencyValue { min-width:38px; text-align:right; font-variant-numeric:tabular-nums; font-size:12px; color:var(--fg); }
+  #logDirPath, #confFilePath, #keysPath { flex:1; min-width:0; font-size:11.5px; color:var(--fg); background:var(--card); border:1px solid var(--line);
+        border-radius:8px; padding:6px 8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl; text-align:left; }
+  #logDirMsg.err, #confFileMsg.err, #keysMsg.err { color:#ff8a8a; }
+  #keysMsg.ok { color:var(--ok); }
+  #ctxPanel textarea, #ctxPanel input[type="text"] { width:100%; resize:vertical; background:var(--card); color:var(--fg);
     border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:12px; line-height:1.45; font-family:inherit; }
-  #ctxPanel textarea:hover, #ctxPanel input[type="number"]:hover { border-color:var(--line-strong); }
+  #ctxPanel textarea:hover, #ctxPanel input[type="number"]:hover, #ctxPanel input[type="text"]:hover { border-color:var(--line-strong); }
   #ctxPanel #jd { min-height:90px; }
   #ctxPanel #cv { min-height:140px; }
   #responseInstructions { min-height:160px; }
@@ -263,6 +271,10 @@
   .hist-item .s { display:block; margin-top:3px; font-size:11.5px; color:var(--mut); overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
   .badge { font-size:10px; padding:0 6px; border-radius:999px; border:1px solid var(--line-strong); color:var(--mut); }
   .badge.meeting { color:var(--acc); border-color:rgba(110,168,254,.4); }
+  .badge.class { color:#c79bff; border-color:rgba(199,155,255,.4); }
+  .export-btns { display:inline-flex; gap:6px; }
+  .mem-meeting .export-btns { margin-top:6px; margin-right:6px; }
+  .mem-result .export-btns { margin-top:10px; margin-left:6px; }
   .badge.pending { color:var(--warn); border-color:rgba(242,196,107,.4); }
   .badge.live { color:var(--ok); border-color:rgba(95,211,154,.4); }
   .hist-detail { flex:1; min-width:0; display:flex; flex-direction:column; min-height:0; }
@@ -360,6 +372,7 @@
       <select id="modeSel" class="mode-select" title="Modo del asistente" aria-label="Modo del asistente">
         <option value="interview">💼 Entrevista</option>
         <option value="meeting">👥 Reunión</option>
+        <option value="class">🎓 Clase online</option>
       </select>
       <div class="group" role="group" aria-label="Fuentes de audio">
         <button id="sysBtn" class="src" title="Escuchar al entrevistador (audio del sistema)" aria-label="Audio del sistema" aria-pressed="false">🖥<span class="src-dot"></span></button>
@@ -430,13 +443,18 @@
       </div>
       <div class="ctx-card">
         <section class="ctx-section meeting-only">
-          <label class="field" for="meetingContext">Contexto de las conversaciones <span class="hint-text">(opcional)</span></label>
+          <label class="field" for="userName">Tu nombre <span class="hint-text">(opcional)</span></label>
+          <input id="userName" type="text" maxlength="80" autocomplete="off" placeholder="Ej.: Ana Pérez" />
+          <span class="hint-text">Cuando alguien te pregunte algo a ti, en vez de una nota verás una 💬 respuesta sugerida para decir en voz alta.</span>
+        </section>
+        <section class="ctx-section meeting-only">
+          <label id="meetingContextLabel" class="field" for="meetingContext">Contexto de las conversaciones <span class="hint-text">(opcional)</span></label>
           <textarea id="meetingContext" maxlength="4000"
             placeholder="Ej.: reunión semanal del equipo de producto (Ana, Luis y yo) / grupo de amigos planeando un viaje…"></textarea>
           <span class="hint-text">Ayuda a entender quién participa y de qué se trata. Los pendientes y resúmenes anteriores se recuerdan solos (🧠 Memoria).</span>
         </section>
         <section class="ctx-section meeting-only">
-          <label class="field" for="meetingDocuments">Documentos relevantes <span class="hint-text">(opcional)</span></label>
+          <label id="meetingDocumentsLabel" class="field" for="meetingDocuments">Documentos relevantes <span class="hint-text">(opcional)</span></label>
           <div class="doc-picker">
             <span id="meetingDocumentsHint" class="hint-text">PDF, TXT o Markdown. Máximo 5 archivos y 12.000 caracteres de contexto total.</span>
             <button id="meetingDocumentsBtn" class="small" type="button">📎 Agregar documentos</button>
@@ -478,11 +496,47 @@
           </fieldset>
         </section>
         <section class="ctx-section">
-          <label class="field" for="responseInstructions">Instrucciones adicionales <span class="hint-text">(opcional)</span></label>
+          <label id="responseInstructionsLabel" class="field" for="responseInstructions">Instrucciones adicionales <span class="hint-text">(opcional)</span></label>
           <textarea id="responseInstructions" maxlength="4000"
             placeholder="Ej.: responde con lenguaje simple, incluye un ejemplo concreto y evita tecnicismos."
             aria-describedby="responseInstructionsHint"></textarea>
-          <span id="responseInstructionsHint" class="hint-text">Máximo 4000 caracteres. No reemplaza el CV ni la descripción del cargo.</span>
+          <span id="responseInstructionsHint" class="hint-text">Máximo 4000 caracteres. Se guardan por separado para entrevistas, reuniones y clases, y solo aplican al modo actual.</span>
+        </section>
+        <section class="ctx-section">
+          <label class="field" for="transparency">Transparencia de la ventana</label>
+          <div class="ctx-row">
+            <span class="hint-text" aria-hidden="true">0%</span>
+            <input id="transparency" type="range" min="0" max="90" step="5" value="0"
+              aria-describedby="transparencyHint" aria-valuetext="0 % de transparencia" />
+            <span class="hint-text" aria-hidden="true">90%</span>
+            <output id="transparencyValue" for="transparency">0%</output>
+          </div>
+          <span id="transparencyHint" class="hint-text">0% = opaca · 90% = casi transparente. Se aplica al instante.</span>
+        </section>
+        <section class="ctx-section">
+          <span class="field" id="keysLabel" style="font-size:11.5px;font-weight:600">Claves de acceso</span>
+          <div class="ctx-row">
+            <span id="keysPath" aria-labelledby="keysLabel" title=""></span>
+            <button id="keysImport" type="button">Cargar archivo de claves…</button>
+          </div>
+          <span id="keysMsg" class="hint-text" role="status"></span>
+        </section>
+        <section class="ctx-section">
+          <span class="field" id="confFileLabel" style="font-size:11.5px;font-weight:600">Archivo de configuración</span>
+          <div class="ctx-row">
+            <span id="confFilePath" aria-labelledby="confFileLabel" title=""></span>
+            <button id="confFileShow" type="button">Mostrar</button>
+          </div>
+          <span id="confFileMsg" class="hint-text" role="status">asistente.conf guarda todo lo de este panel: se lee al abrir la app y se actualiza al guardar. Puedes copiarlo a otro usuario o editarlo a mano.</span>
+        </section>
+        <section class="ctx-section">
+          <span class="field" id="logDirLabel" style="font-size:11.5px;font-weight:600">Carpeta de transcripciones</span>
+          <div class="ctx-row">
+            <span id="logDirPath" aria-labelledby="logDirLabel" title=""></span>
+            <button id="logDirPick" type="button">Cambiar…</button>
+            <button id="logDirReset" type="button" title="Volver a la ubicación predeterminada" hidden>Predeterminada</button>
+          </div>
+          <span id="logDirMsg" class="hint-text" role="status">Se crea una carpeta «transcripciones» dentro de la que elijas. La sesión en curso sigue en su carpeta actual.</span>
         </section>
         <label class="share-option" for="shareInterfaceVisible">
           <input id="shareInterfaceVisible" name="shareInterfaceVisible" type="checkbox" />
@@ -508,7 +562,7 @@
       <div class="mem-body">
         <div id="memResult" class="mem-result" role="status" aria-live="polite" hidden></div>
         <section class="mem-section">
-          <h3>Pendientes abiertos</h3>
+          <h3 id="memOpenTitle">Pendientes abiertos</h3>
           <ul id="memOpen" class="mem-items"></ul>
           <details class="mem-done-wrap">
             <summary id="memDoneLabel">Completados</summary>
@@ -516,7 +570,7 @@
           </details>
         </section>
         <section class="mem-section">
-          <h3>Conversaciones anteriores <button id="memHistory" class="small" type="button">📚 Ver historial completo</button></h3>
+          <h3 id="memPastTitle">Conversaciones anteriores <button id="memHistory" class="small" type="button">📚 Ver historial completo</button></h3>
           <div id="memMeetings"></div>
         </section>
       </div>
@@ -547,6 +601,8 @@
               <div class="ttl"><strong id="histTitle"></strong><span id="histDate" class="muted"></span></div>
               <button id="histSummarize" class="small primary" type="button">📝 Resumir</button>
               <button id="histOpen" class="small" type="button">📂 Abrir carpeta</button>
+              <button id="histWord" class="small" type="button" title="Exportar todo (resumen, ideas, tareas, ejemplos, transcripción) a Word">📄 Word</button>
+              <button id="histPdf" class="small" type="button" title="Exportar todo (resumen, ideas, tareas, ejemplos, transcripción) a PDF">📕 PDF</button>
             </div>
             <div id="histTabs" class="hist-tabs" role="tablist" aria-label="Archivos de la conversación"></div>
             <div id="histContent" class="md" role="tabpanel"></div>
@@ -627,6 +683,8 @@
       </div>
     </dialog>
   </div>
+  <script src="question.js"></script>
+  <script src="notes.js"></script>
   <script src="deepgram.js"></script>
   <script src="renderer.js"></script>
 </body>

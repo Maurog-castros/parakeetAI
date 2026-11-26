@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, globalShortcut, desktopCapturer, session, Tray, Menu, nativeImage, screen, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, desktopCapturer, session, Tray, Menu, nativeImage, screen, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const llm = require('./llm');
@@ -9,15 +9,34 @@ const transcriptLog = require('./transcriptLog');
 const meetingMemory = require('./meetingMemory');
 const sessionFiles = require('./sessionFiles');
 const history = require('./history');
+const exportDoc = require('./exportDoc');
+const assistantConf = require('./assistantConf');
 
 // --- minimal .env loader (no dependency) ---
-function loadEnv() {
-  const p = path.join(__dirname, '..', '.env');
-  if (!fs.existsSync(p)) return;
-  for (const line of fs.readFileSync(p, 'utf8').split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+// Access keys come from Documents/ParakeetAI/claves.env (handed to each user
+// privately and loaded from ⚙ Configuración) and, as a fallback, from the .env
+// bundled next to the app. The public .dmg carries no keys.
+const KEYS_NAME = 'claves.env';
+function keysFile() { return path.join(app.getPath('documents'), 'ParakeetAI', KEYS_NAME); }
+function parseEnv(text) {
+  const out = {};
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+    if (m) out[m[1]] = m[2];
   }
+  return out;
+}
+function loadEnvFile(p, override) {
+  try {
+    if (!fs.existsSync(p)) return;
+    for (const [k, v] of Object.entries(parseEnv(fs.readFileSync(p, 'utf8')))) {
+      if (override || !process.env[k]) process.env[k] = v;
+    }
+  } catch (e) { console.log('[env]', p, e.message); }
+}
+function loadEnv() {
+  loadEnvFile(keysFile(), false);
+  loadEnvFile(path.join(__dirname, '..', '.env'), false);
 }
 loadEnv();
 
@@ -41,29 +60,107 @@ let expandedHeight = 560;
 
 // --- interview context (CV + job description), persisted in userData ---
 let context = {
-  mode: 'interview',      // 'interview' | 'meeting'
+  mode: 'interview',      // 'interview' | 'meeting' | 'class'
   meetingContext: '',     // meeting mode: who/what the conversation is about
   meetingDocuments: [],   // extracted reference documents for meeting mode
+  userName: '',           // meeting/class: your name, to answer questions addressed to you
   cv: '',
   jd: '',
   responseChars: 500,
   responseFormat: 'bullets',
-  responseInstructions: '',
+  responseInstructions: '', // interview mode
+  meetingInstructions: '',
+  classInstructions: '',
   shareInterfaceVisible: false,
+  transparency: 0,        // window transparency in % (0 = opaque … 90 = almost invisible)
+  logDir: '',             // custom transcripts folder ('' = default location)
 };
-function contextFile() { return path.join(app.getPath('userData'), 'parakeet-context.json'); }
+const MAX_TRANSPARENCY = 90;
+function normalizeTransparency(v) {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? Math.min(MAX_TRANSPARENCY, Math.max(0, n)) : 0;
+}
+// Settings live in asistente.conf, a plain-text file the user can open and
+// edit: Documents/ParakeetAI/asistente.conf in the installed app (next to the
+// transcripts, survives updates), the project root in development.
+// First launch without it: a template asistente.conf placed next to the .exe
+// (Windows) or bundled by the Mac installer seeds it; otherwise the older
+// userData/parakeet-context.json is migrated.
+const CONF_NAME = 'asistente.conf';
+function confFile() {
+  return app.isPackaged
+    ? path.join(app.getPath('documents'), 'ParakeetAI', CONF_NAME)
+    : path.join(__dirname, '..', CONF_NAME);
+}
+function confSeeds() {
+  if (!app.isPackaged) return [];
+  return [path.join(path.dirname(process.execPath), CONF_NAME), path.join(__dirname, '..', CONF_NAME)];
+}
+function legacyContextFile() { return path.join(app.getPath('userData'), 'parakeet-context.json'); }
+let confMtime = 0;     // mtime of asistente.conf as last read or written
+let confWarnings = []; // lines of the file that could not be used
+const mtimeOf = (p) => { try { return fs.statSync(p).mtimeMs; } catch (_) { return 0; } };
+function readConf(p) {
+  const r = assistantConf.parse(fs.readFileSync(p, 'utf8'));
+  confWarnings = r.warnings;
+  if (r.warnings.length) console.log('[conf]', p, r.warnings.join(' · '));
+  return r.values;
+}
 function loadContext() {
-  try { context = Object.assign(context, JSON.parse(fs.readFileSync(contextFile(), 'utf8'))); } catch (_) {}
+  const file = confFile();
+  let migrate = false;
+  try {
+    if (fs.existsSync(file)) {
+      context = Object.assign(context, readConf(file));
+      confMtime = mtimeOf(file);
+    } else {
+      const seed = confSeeds().find((p) => fs.existsSync(p));
+      if (seed) context = Object.assign(context, readConf(seed));
+      else if (fs.existsSync(legacyContextFile())) context = Object.assign(context, JSON.parse(fs.readFileSync(legacyContextFile(), 'utf8')));
+      migrate = true;
+    }
+  } catch (e) { console.log('[conf] load err', e.message); }
+  normalizeContext();
+  if (migrate) saveContextToDisk();
+}
+// asistente.conf edited by hand while the app is open: pick it up the next
+// time the settings panel opens (before a save would overwrite it).
+function reloadContextIfEdited() {
+  const file = confFile();
+  const m = mtimeOf(file);
+  if (!m || m === confMtime) return false;
+  try { context = Object.assign(context, readConf(file)); } catch (e) { console.log('[conf] reload err', e.message); return false; }
+  confMtime = m;
+  normalizeContext();
+  return true;
+}
+function normalizeContext() {
   context.responseChars = llm.normalizeResponseChars(context.responseChars);
   context.responseFormat = llm.normalizeResponseFormat(context.responseFormat);
   context.responseInstructions = llm.normalizeResponseInstructions(context.responseInstructions);
+  context.meetingInstructions = llm.normalizeResponseInstructions(context.meetingInstructions);
+  context.classInstructions = llm.normalizeResponseInstructions(context.classInstructions);
   context.shareInterfaceVisible = context.shareInterfaceVisible === true;
   context.mode = llm.normalizeMode(context.mode);
   context.meetingContext = llm.normalizeMeetingContext(context.meetingContext);
   context.meetingDocuments = llm.normalizeMeetingDocuments(context.meetingDocuments);
+  context.userName = llm.normalizeUserName(context.userName);
+  context.transparency = normalizeTransparency(context.transparency);
+  context.logDir = typeof context.logDir === 'string' ? context.logDir : '';
 }
 function saveContextToDisk() {
-  try { fs.writeFileSync(contextFile(), JSON.stringify(context), 'utf8'); } catch (e) { console.log('[ctx] save err', e.message); }
+  const file = confFile();
+  const tmp = file + '.tmp';
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, assistantConf.serialize(context), 'utf8');
+    fs.renameSync(tmp, file); // never leave a half-written file
+    confMtime = mtimeOf(file);
+    confWarnings = [];
+  } catch (e) {
+    console.log('[conf] save err', e.message);
+    try { fs.rmSync(tmp, { force: true }); } catch (_) {}
+  }
 }
 
 // --- meeting memory (previous meetings + open action items), in userData ---
@@ -75,12 +172,20 @@ function loadMemory() {
 function saveMemoryToDisk() {
   try { fs.writeFileSync(memoryFile(), JSON.stringify(memory, null, 2), 'utf8'); } catch (e) { console.log('[mem] save err', e.message); }
 }
-// Context for LLM calls; meeting mode adds the memory (open items + last meetings).
-function llmContext(exceptMeetingId) {
-  if (context.mode !== 'meeting') return context;
+// Context for LLM calls; meeting/class mode adds the memory of that kind
+// (open items + last meetings or classes). mode defaults to the current one.
+function llmContext(exceptMeetingId, mode) {
+  const m = llm.normalizeMode(mode || context.mode);
+  if (!llm.isMeetingLike(m)) return context;
   return Object.assign({}, context, {
-    memoryContext: meetingMemory.buildMemoryContext(memory, { exceptMeetingId }),
+    mode: m,
+    memoryContext: meetingMemory.buildMemoryContext(memory, { exceptMeetingId, kind: m }),
   });
+}
+
+function applyTransparency() {
+  if (!win) return;
+  try { win.setOpacity(1 - context.transparency / 100); } catch (_) {}
 }
 
 function applyShareVisibility() {
@@ -119,6 +224,7 @@ function createWindow() {
   // macOS: keep the overlay over full-screen meetings and on every Space.
   if (IS_MAC) { try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch (_) {} }
   applyShareVisibility();
+  applyTransparency();
 
   // Electron 35+ passes a single event object; older versions pass positional args.
   // Declared with one parameter so Electron 35+ doesn't warn about positional args.
@@ -286,6 +392,36 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 app.on('will-quit', () => globalShortcut.unregisterAll());
 
 // --- IPC ---
+// ⚙ Configuración > Claves de acceso: copy the chosen file to
+// Documents/ParakeetAI/claves.env, apply it and reload the window so every
+// connection picks up the new keys.
+const REQUIRED_KEYS = ['IAMIKO_TOKEN', 'STT_TOKEN'];
+function keysInfo() {
+  return { path: keysFile(), present: fs.existsSync(keysFile()), missing: REQUIRED_KEYS.filter((k) => !process.env[k]) };
+}
+ipcMain.handle('keys-info', () => keysInfo());
+ipcMain.handle('import-keys', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Elige el archivo de claves de ParakeetAI',
+    properties: ['openFile', 'showHiddenFiles'],
+    filters: [{ name: 'Claves', extensions: ['env', 'txt'] }, { name: 'Todos los archivos', extensions: ['*'] }],
+  });
+  if (r.canceled || !r.filePaths || !r.filePaths[0]) return Object.assign({ ok: false, canceled: true }, keysInfo());
+  let text;
+  try { text = fs.readFileSync(r.filePaths[0], 'utf8'); } catch (e) { return Object.assign({ ok: false, error: e.message }, keysInfo()); }
+  const found = parseEnv(text);
+  if (!REQUIRED_KEYS.some((k) => found[k])) {
+    return Object.assign({ ok: false, error: 'el archivo no trae IAMIKO_TOKEN ni STT_TOKEN' }, keysInfo());
+  }
+  try {
+    fs.mkdirSync(path.dirname(keysFile()), { recursive: true });
+    fs.writeFileSync(keysFile(), text, 'utf8');
+  } catch (e) { return Object.assign({ ok: false, error: e.message }, keysInfo()); }
+  loadEnvFile(keysFile(), true);
+  setTimeout(() => { if (win && !win.isDestroyed()) win.reload(); }, 600);
+  return Object.assign({ ok: true }, keysInfo());
+});
+
 ipcMain.handle('config', () => {
   const c = llm.cfg();
   return {
@@ -358,24 +494,28 @@ ipcMain.handle('tts', async (_e, text) => {
 // sessionFiles.js). The renderer pushes a snapshot on every change; the
 // transcript is rewritten in place every LOG_AUTOSAVE_MS (if changed), on
 // "Limpiar" (then a new session starts) and when the app quits.
-// Dev: <project>/transcripciones. Packaged: Documents\ParakeetAI\transcripciones,
+// Default: dev <project>/transcripciones; packaged Documents/ParakeetAI/transcripciones,
 // outside the app folder so rebuilding/replacing dist never deletes them.
-const LOG_DIR = app.isPackaged
-  ? path.join(app.getPath('documents'), 'ParakeetAI', 'transcripciones')
-  : path.join(__dirname, '..', 'transcripciones');
+// The user can pick another location in Configuración (context.logDir).
+function defaultLogDir() {
+  return app.isPackaged
+    ? path.join(app.getPath('documents'), 'ParakeetAI', 'transcripciones')
+    : path.join(__dirname, '..', 'transcripciones');
+}
+function logRoot() { return context.logDir || defaultLogDir(); }
 const LOG_AUTOSAVE_MS = 20000;
 let logSession = null; // latest snapshot from the renderer
 let logDir = null;     // folder of the current session (set on first write)
 let logDirty = false;
 
 function freeDir(base) {
-  let dir = path.join(LOG_DIR, base);
-  for (let n = 2; fs.existsSync(dir); n++) dir = path.join(LOG_DIR, `${base}_${n}`);
+  let dir = path.join(logRoot(), base);
+  for (let n = 2; fs.existsSync(dir); n++) dir = path.join(logRoot(), `${base}_${n}`);
   return dir;
 }
 function ensureLogDir() {
   if (logDir && fs.existsSync(logDir)) return logDir;
-  fs.mkdirSync(LOG_DIR, { recursive: true });
+  fs.mkdirSync(logRoot(), { recursive: true });
   logDir = freeDir(sessionFiles.sessionFolderName(logSession && (logSession.startedAt || logSession.endedAt)));
   fs.mkdirSync(logDir, { recursive: true });
   return logDir;
@@ -510,18 +650,20 @@ ipcMain.handle('get-memory', () => memory);
 // session replaces its previous version) and writes the summary files into
 // the session folder, renamed to include the title. getDir() returns the
 // folder once the summary is known (null: memory only).
-async function summarizeSession(transcript, startedAt, endedAt, getDir) {
+// mode: 'meeting' | 'class' (anything else counts as a meeting).
+async function summarizeSession(transcript, startedAt, endedAt, getDir, mode) {
+  const kind = llm.normalizeMode(mode) === 'class' ? 'class' : 'meeting';
   const meetingId = meetingMemory.meetingIdFor(startedAt);
-  const raw = await llm.summarizeMeeting(transcript, llmContext(meetingId));
+  const raw = await llm.summarizeMeeting(transcript, llmContext(meetingId, kind));
   const parsed = meetingMemory.parseSummaryJson(raw);
   if (!parsed) return { ok: false, error: 'el modelo no devolvió un resumen válido', raw: raw.slice(0, 2000) };
   let dir = getDir();
   if (dir) dir = renameSessionDir(dir, startedAt, meetingMemory.normalizeSummary(parsed).title);
-  const result = meetingMemory.applySummary(memory, parsed, { meetingId, startedAt, endedAt, folder: dir || '' });
+  const result = meetingMemory.applySummary(memory, parsed, { meetingId, startedAt, endedAt, folder: dir || '', kind });
   memory = result.memory;
   saveMemoryToDisk();
   if (dir) {
-    const files = sessionFiles.meetingFiles(result.meeting, result.newItems, result.resolvedItems, meetingMemory.openItems(memory, meetingId));
+    const files = sessionFiles.meetingFiles(result.meeting, result.newItems, result.resolvedItems, meetingMemory.openItems(memory, meetingId, kind));
     try {
       for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), content, 'utf8');
     } catch (err) { console.error('[log] summary files failed', err.message || err); }
@@ -535,11 +677,12 @@ ipcMain.handle('meeting-summarize', async (_e, session) => {
     const snap = session || logSession;
     if (!snap || !Array.isArray(snap.transcript) || !snap.transcript.length) return { ok: false, error: 'no hay conversación para resumir' };
     const endedAt = new Date().toISOString();
+    const mode = llm.isMeetingLike(snap.mode) ? snap.mode : context.mode;
     return await summarizeSession(snap.transcript, snap.startedAt, endedAt, () => {
       logSession = Object.assign({}, snap, { endedAt });
       logDirty = true;
       return safeWriteSessionLog();
-    });
+    }, mode);
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
   }
@@ -547,12 +690,12 @@ ipcMain.handle('meeting-summarize', async (_e, session) => {
 
 // --- history: browse saved sessions (transcripciones/) ---
 ipcMain.handle('history-list', (_e, query) => {
-  try { return { ok: true, sessions: history.listSessions(LOG_DIR, query), current: logDir ? path.basename(logDir) : '' }; }
+  try { return { ok: true, sessions: history.listSessions(logRoot(), query), current: logDir ? path.basename(logDir) : '' }; }
   catch (err) { return { ok: false, error: String(err && err.message || err) }; }
 });
 
 ipcMain.handle('history-read', (_e, id) => {
-  const s = history.readSession(LOG_DIR, id);
+  const s = history.readSession(logRoot(), id);
   return s ? { ok: true, info: s.info, files: s.files } : { ok: false, error: 'sesión no encontrada' };
 });
 
@@ -560,15 +703,15 @@ ipcMain.handle('history-read', (_e, id) => {
 // are first moved into their own folder.
 ipcMain.handle('history-summarize', async (_e, id) => {
   try {
-    if (!history.resolveSession(LOG_DIR, id)) return { ok: false, error: 'sesión no encontrada' };
+    if (!history.resolveSession(logRoot(), id)) return { ok: false, error: 'sesión no encontrada' };
     const started = history.stampDate(String(id));
-    const dir = history.migrateFlatLog(LOG_DIR, id);
+    const dir = history.migrateFlatLog(logRoot(), id);
     const md = fs.readFileSync(path.join(dir, sessionFiles.TRANSCRIPT_FILE), 'utf8');
-    const { transcript } = transcriptLog.parseTranscriptLog(md, started);
+    const { transcript, mode } = transcriptLog.parseTranscriptLog(md, started);
     if (!transcript.length) return { ok: false, error: 'la sesión no tiene transcripción' };
     const startedAt = started.toISOString();
     const endedAt = transcript[transcript.length - 1].time || startedAt;
-    const r = await summarizeSession(transcript, startedAt, endedAt, () => dir);
+    const r = await summarizeSession(transcript, startedAt, endedAt, () => dir, mode);
     if (r.ok) r.id = path.basename(r.folder || dir);
     return r;
   } catch (err) {
@@ -576,12 +719,56 @@ ipcMain.handle('history-summarize', async (_e, id) => {
   }
 });
 
+// Export a saved session (summary, ideas, tasks, examples, transcript…) to
+// Word (.docx) or PDF; the user picks where in a save dialog.
+const KIND_LABEL = { interview: 'Entrevista', meeting: 'Reunión', class: 'Clase' };
+async function htmlToPdf(html) {
+  const tmp = path.join(app.getPath('temp'), `parakeet-export-${process.pid}-${Date.now()}.html`);
+  fs.writeFileSync(tmp, html, 'utf8');
+  const pdfWin = new BrowserWindow({ show: false, webPreferences: { javascript: false, sandbox: true } });
+  try {
+    await pdfWin.loadFile(tmp);
+    return await pdfWin.webContents.printToPDF({ pageSize: 'A4', printBackground: true, preferCSSPageSize: true });
+  } finally {
+    pdfWin.destroy();
+    fs.rm(tmp, { force: true }, () => {});
+  }
+}
+ipcMain.handle('history-export', async (_e, id, format) => {
+  try {
+    const fmt = format === 'pdf' ? 'pdf' : 'docx';
+    const s = history.readSession(logRoot(), id);
+    if (!s) return { ok: false, error: 'sesión no encontrada' };
+    if (!Object.values(s.files).some((t) => String(t || '').trim())) return { ok: false, error: 'la sesión está vacía' };
+    const kindLabel = KIND_LABEL[s.info.mode] || 'Conversación';
+    const d = new Date(s.info.startedAt);
+    const subtitle = kindLabel + (Number.isNaN(d.getTime()) ? '' : ' · ' + d.toLocaleString('es-CL', { dateStyle: 'full', timeStyle: 'short' }));
+    const pick = await dialog.showSaveDialog(win, {
+      title: fmt === 'pdf' ? 'Exportar a PDF' : 'Exportar a Word',
+      defaultPath: path.join(app.getPath('documents'), exportDoc.exportFileName(s.info.startedAt, kindLabel, s.info.title, fmt)),
+      filters: fmt === 'pdf' ? [{ name: 'PDF', extensions: ['pdf'] }] : [{ name: 'Documento de Word', extensions: ['docx'] }],
+    });
+    if (pick.canceled || !pick.filePath) return { ok: false, canceled: true };
+    const data = fmt === 'pdf'
+      ? await htmlToPdf(exportDoc.sessionHtml(s.info.title, subtitle, s.files))
+      : exportDoc.sessionDocx(s.info.title, subtitle, s.files);
+    fs.writeFileSync(pick.filePath, data);
+    shell.showItemInFolder(pick.filePath);
+    return { ok: true, file: pick.filePath };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
 // Opens a session folder (or the transcripciones root) in the file explorer.
-// Only paths inside LOG_DIR are allowed.
+// Only paths inside the transcripts root (or the current session's folder,
+// which may still be in a previous root after the user changed it) are allowed.
 ipcMain.handle('open-folder', async (_e, folder) => {
-  const rootDir = path.resolve(LOG_DIR);
+  const rootDir = path.resolve(logRoot());
   let target = path.resolve(String(folder || rootDir));
-  if (target !== rootDir && !target.startsWith(rootDir + path.sep)) return { ok: false, error: 'ruta no permitida' };
+  const inRoot = target === rootDir || target.startsWith(rootDir + path.sep);
+  const isCurrent = logDir && target === path.resolve(logDir);
+  if (!inRoot && !isCurrent) return { ok: false, error: 'ruta no permitida' };
   if (!fs.existsSync(target)) target = rootDir;
   fs.mkdirSync(target, { recursive: true });
   const err = await shell.openPath(target);
@@ -609,18 +796,33 @@ ipcMain.handle('memory-remove-meeting', (_e, id) => {
   return memory;
 });
 
-ipcMain.handle('get-context', () => context);
+ipcMain.handle('get-context', () => {
+  if (reloadContextIfEdited()) { applyTransparency(); applyShareVisibility(); }
+  return context;
+});
+ipcMain.handle('conf-info', () => ({ path: confFile(), warnings: confWarnings }));
+ipcMain.handle('conf-reveal', () => {
+  if (!fs.existsSync(confFile())) saveContextToDisk();
+  shell.showItemInFolder(confFile());
+  return true;
+});
 ipcMain.handle('save-context', (_e, data) => {
   context = {
     mode: context.mode,
     meetingContext: llm.normalizeMeetingContext(data && data.meetingContext),
     meetingDocuments: llm.normalizeMeetingDocuments(data && data.meetingDocuments),
+    userName: llm.normalizeUserName(data && data.userName),
     cv: String(data && data.cv || ''),
     jd: String(data && data.jd || ''),
     responseChars: llm.normalizeResponseChars(data && data.responseChars),
     responseFormat: llm.normalizeResponseFormat(data && data.responseFormat),
     responseInstructions: llm.normalizeResponseInstructions(data && data.responseInstructions),
+    meetingInstructions: llm.normalizeResponseInstructions(data && data.meetingInstructions),
+    classInstructions: llm.normalizeResponseInstructions(data && data.classInstructions),
     shareInterfaceVisible: data && data.shareInterfaceVisible === true,
+    // Applied immediately by their own controls; keep them as they are.
+    transparency: context.transparency,
+    logDir: context.logDir,
   };
   saveContextToDisk();
   applyShareVisibility();
@@ -636,6 +838,40 @@ ipcMain.handle('save-context', (_e, data) => {
 });
 
 ipcMain.on('set-click-through', (_e, on) => setClickThrough(on));
+
+// Window transparency (0–90 %), applied live while the slider moves.
+ipcMain.handle('set-transparency', (_e, value) => {
+  context.transparency = normalizeTransparency(value);
+  applyTransparency();
+  saveContextToDisk();
+  return context.transparency;
+});
+
+// Transcripts folder. The chosen folder gets a "transcripciones" subfolder
+// (unless it already is one). The session in progress keeps writing where it
+// started; new sessions and the history use the new location.
+function logDirInfo() { return { path: logRoot(), custom: !!context.logDir }; }
+ipcMain.handle('log-dir-info', () => logDirInfo());
+ipcMain.handle('pick-log-dir', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Elige dónde guardar la carpeta de transcripciones',
+    defaultPath: path.dirname(logRoot()),
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (r.canceled || !r.filePaths || !r.filePaths[0]) return Object.assign({ ok: false, canceled: true }, logDirInfo());
+  const chosen = r.filePaths[0];
+  const dir = path.basename(chosen).toLowerCase() === 'transcripciones' ? chosen : path.join(chosen, 'transcripciones');
+  try { fs.mkdirSync(dir, { recursive: true }); fs.accessSync(dir, fs.constants.W_OK); }
+  catch (e) { return Object.assign({ ok: false, error: 'No se puede escribir en esa carpeta: ' + e.message }, logDirInfo()); }
+  context.logDir = path.resolve(dir) === path.resolve(defaultLogDir()) ? '' : dir;
+  saveContextToDisk();
+  return Object.assign({ ok: true }, logDirInfo());
+});
+ipcMain.handle('reset-log-dir', () => {
+  context.logDir = '';
+  saveContextToDisk();
+  return Object.assign({ ok: true }, logDirInfo());
+});
 
 // Window drag done by hand instead of -webkit-app-region: drag. The OS move
 // loop (WM_SYSCOMMAND/SC_MOVE) can draw a drag outline / flash a white frame

@@ -41,12 +41,13 @@ function fmtDate(iso) {
 }
 
 const bullets = (arr, empty) => (arr && arr.length ? arr.map((x) => '- ' + x) : [empty || '_Nada registrado._']);
-const itemLine = (it, done) => `- [${done ? 'x' : ' '}] ${it.text}${it.owner ? ` — ${it.owner}` : ''}`;
+const itemLine = (it, done) => `- [${done ? 'x' : ' '}] ${it.text}${it.owner ? ` — ${it.owner}` : ''}${it.due ? ` _(entrega: ${it.due})_` : ''}`;
 
 // files: { name: content } for a summarised meeting.
 // stillOpen: open items from previous meetings (not created by this one).
 function meetingFiles(meeting, newItems, resolvedItems, stillOpen) {
   const m = meeting || {};
+  if (m.kind === 'class') return classFiles(m, newItems, resolvedItems, stillOpen);
   const head = (title) => [`# ${title} · ${m.title || 'Conversación'}`, '', `_${fmtDate(m.startedAt)}_`, ''];
   const files = {};
 
@@ -88,6 +89,51 @@ function meetingFiles(meeting, newItems, resolvedItems, stillOpen) {
     stillOpen: stillOpen || [],
   }, null, 2) + '\n';
 
+  return files;
+}
+
+// Online class: resumen.md, ideas.md (ideas principales), tareas.md,
+// ejemplos.md, proximos-pasos.md (para repasar + dudas) and reunion.json
+// (same name as meetings so the history reads both).
+function classFiles(m, newItems, resolvedItems, stillOpen) {
+  const head = (title) => [`# ${title} · ${m.title || 'Clase'}`, '', `_${fmtDate(m.startedAt)}_`, ''];
+  const files = {};
+  files['resumen.md'] = [
+    ...head('Resumen de la clase'),
+    m.summary || '_Sin resumen._',
+    '',
+    '## Temas vistos', '', ...bullets(m.topics), '',
+  ].join('\n');
+  files['ideas.md'] = [
+    ...head('Ideas principales'),
+    ...bullets(m.ideas), '',
+  ].join('\n');
+  files['ejemplos.md'] = [
+    ...head('Ejemplos'),
+    ...bullets(m.examples, '_No se registraron ejemplos._'), '',
+  ].join('\n');
+  files['tareas.md'] = [
+    ...head('Tareas'),
+    '## Encargadas en esta clase', '',
+    ...(newItems && newItems.length ? newItems.map((it) => itemLine(it, false)) : ['_Ninguna._']), '',
+    '## Cerradas en esta clase', '',
+    ...(resolvedItems && resolvedItems.length ? resolvedItems.map((it) => itemLine(it, true)) : ['_Ninguna._']), '',
+    '## Siguen abiertas de clases anteriores', '',
+    ...(stillOpen && stillOpen.length
+      ? stillOpen.map((it) => itemLine(it, false) + (it.createdAt ? ` _(desde ${it.createdAt.slice(0, 10)})_` : ''))
+      : ['_Ninguna._']), '',
+  ].join('\n');
+  files['proximos-pasos.md'] = [
+    ...head('Para repasar'),
+    ...bullets(m.nextSteps), '',
+    '## Dudas para la próxima clase', '', ...bullets(m.questions, '_Ninguna._'), '',
+  ].join('\n');
+  files['reunion.json'] = JSON.stringify({
+    meeting: m,
+    newItems: newItems || [],
+    resolvedItems: resolvedItems || [],
+    stillOpen: stillOpen || [],
+  }, null, 2) + '\n';
   return files;
 }
 

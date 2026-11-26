@@ -5,7 +5,9 @@
 
 const WHO_LABEL = { them: 'Entrevistador', me: 'Yo' };
 const MEETING_WHO_LABEL = { them: 'Otros', me: 'Yo' };
-const MODE_LABEL = { auto: 'auto', manual: 'manual', mine: 'mi pregunta', screenshot: 'captura' };
+const CLASS_WHO_LABEL = { them: 'Clase', me: 'Yo' };
+const HEADER = { interview: 'Entrevista', meeting: 'Reunión', class: 'Clase' };
+const MODE_LABEL = { auto: 'auto', manual: 'manual', mine: 'mi pregunta', screenshot: 'captura', reply: 'respuesta sugerida' };
 
 const pad = (n) => String(n).padStart(2, '0');
 const toDate = (v) => {
@@ -21,8 +23,9 @@ function logFileName(date) {
 
 // session: { mode, startedAt, endedAt, transcript: [{who, text, time}], answers: [{who, question, text, mode, time}], summary }
 function buildTranscriptLog(session) {
-  const meeting = session && session.mode === 'meeting';
-  const who = meeting ? MEETING_WHO_LABEL : WHO_LABEL;
+  const mode = session && HEADER[session.mode] ? session.mode : 'interview';
+  const meeting = mode !== 'interview'; // meeting or class: live notes
+  const who = mode === 'class' ? CLASS_WHO_LABEL : meeting ? MEETING_WHO_LABEL : WHO_LABEL;
   const summary = String(session && session.summary || '').trim();
   const transcript = (Array.isArray(session && session.transcript) ? session.transcript : [])
     .map((t) => ({
@@ -52,11 +55,11 @@ function buildTranscriptLog(session) {
   const fmtDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hms(d)}`;
 
   const lines = [
-    `# ${meeting ? 'Reunión' : 'Entrevista'} ${fmtDate(start)}`,
+    `# ${HEADER[mode]} ${fmtDate(start)}`,
     '',
     `- Inicio: ${fmtDate(start)}`,
     `- Fin: ${fmtDate(end)}`,
-    `- Intervenciones: ${transcript.length} (${meeting ? 'otros' : 'entrevistador'} ${transcript.filter((t) => t.who === 'them').length}, yo ${transcript.filter((t) => t.who === 'me').length})`,
+    `- Intervenciones: ${transcript.length} (${mode === 'class' ? 'clase' : meeting ? 'otros' : 'entrevistador'} ${transcript.filter((t) => t.who === 'them').length}, yo ${transcript.filter((t) => t.who === 'me').length})`,
     `- ${meeting ? 'Notas en vivo' : 'Respuestas sugeridas'}: ${answers.length}`,
     '',
   ];
@@ -92,7 +95,7 @@ function buildTranscriptLog(session) {
 // baseDate (session start) gives the date for the hh:mm:ss stamps.
 function parseTranscriptLog(md, baseDate) {
   const text = String(md || '').replace(/\r\n/g, '\n');
-  const mode = /^#\s*Reuni[oó]n/m.test(text) ? 'meeting' : 'interview';
+  const mode = /^#\s*Clase/m.test(text) ? 'class' : /^#\s*Reuni[oó]n/m.test(text) ? 'meeting' : 'interview';
   const base = new Date(baseDate);
   const hasBase = !Number.isNaN(base.getTime());
   const transcript = [];
